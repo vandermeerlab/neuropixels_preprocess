@@ -1,0 +1,42 @@
+# TPrime Parameters File
+# This file configures the behavior of run_tprime.py for synchronizing data across Neuropixels probes
+
+# Required Parameters
+# Path to the CatGT output directory (location of sync and event files)
+CATGT_OUTPUT_DIR=E:\STNPilot\Test\catgt_M511-2024-11-14_g0
+
+# Path where aligned event files will be saved (This folder should exist)
+OUTPUT_DIR=E:\STNPilot\Test\preprocessed
+
+# Session identifier used for logging and file naming
+SESSION_ID=M11-2024-11-04
+
+# Path to TPrime executable directory
+TPRIME_PATH=D:\TPrime-win
+
+# Alignment Options
+# List of all probes in the recording (comma-separated)
+PROBE_INDICES=0,1
+
+# Reference probe against which other probes will be aligned
+TO_PROBE=0
+
+# Data alignment options (set to true or false)
+ALIGN_EVENTS=True
+ALIGN_SPIKES=True
+ALIGN_LFP=True
+
+# Channels to align - analog (comma-separated)
+ANALOG_CHANNELS=XA0,XA1,XA2,XA3,XA4,XA5,XA6,XA7
+
+# Channels to align - digital (comma-separated)
+DIGITAL_CHANNELS=XD2,XD3
+
+# Kilosort output folders (JSON format mapping probe indices to folder paths)
+KS_OUTPUT_FOLDERS={"1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
+
+# Process monitoring interval in seconds
+CHECK_INTERVAL=15
+
+# Maximum time to wait for TPrime to complete (seconds)
+TIMEOUT=300

@@ -1,0 +1,32 @@
+# Extract Units Parameters File
+# This file configures the behavior of extract_units_post_curation.py for extracting sorted units after Phy curation
+
+# Required Parameters
+# Path to the CatGT output directory with tcat raw recordings
+CATGT_OUTPUT_DIR=E:\STNPilot\Test\catgt_M511-2024-11-14_g0
+
+# Path to save output MAT files with extracted units
+OUTPUT_DIR=E:\STNPilot\Test\preprocessed
+
+# Session identifier used for logging and file naming
+SESSION_ID=M511-2024-11-14
+
+# Processing Options
+# List of probes to process (comma-separated)
+PROBE_INDICES=0,1
+
+# Sorter output folders (JSON format mapping probe indices to Kilosort/Phy output paths)
+SORTER_OUTPUT_FOLDERS={"0": "F:\\KS4_outputs\\M511-2024-11-14_imec0\\sorter_output", "1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
+
+# SI preprocess folders containing binary recordings (JSON format)
+PREPROCESS_FOLDERS={"0": "E:\\STNPilot\\Test\\preprocessed\\imec0_si_preprocess", "1": "E:\\STNPilot\\Test\\preprocessed\\imec1_si_preprocess"}
+
+# Whether to extract and save unit waveforms
+SAVE_WAVEFORMS=true
+
+# Unit types to extract
+EXTRACT_GOOD_UNITS=True
+EXTRACT_MUA_UNITS=True
+
+# Number of parallel jobs for waveform extraction (-1 uses the maximum possible channels)
+NUM_JOBS=-1

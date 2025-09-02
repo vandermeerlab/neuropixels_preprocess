@@ -1,0 +1,7 @@
+# Batch processing file
+# Each line contains the path to a parameters file for a different session
+# Lines starting with # are comments and will be ignored
+
+E:\STNPilot\Test\M511_2024_11_14_catgt_params.txt
+E:\STNPilot\Test\M511_2024_11_15_catgt_params.txt
+E:\STNPilot\Test\M511_2024_11_16_catgt_params.txt

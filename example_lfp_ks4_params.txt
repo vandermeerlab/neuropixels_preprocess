@@ -1,0 +1,44 @@
+# LFP Extraction and Kilosort4 Parameters
+# Lines starting with # are comments and will be ignored
+
+# Required parameters (output firectory should exist)
+CATGT_OUTPUT_DIR = E:\STNPilot\Test\catgt_M511-2024-11-14_g0
+OUTPUT_DIR = E:\STNPilot\Test\preprocessed
+SESSION_ID = M511-2024-11-14
+FAST_STORAGE_DIR = F:\KS4_outputs
+
+# Probe configuration
+# List of probe indices to process (comma-separated, no spaces)
+PROBE_INDICES = 0,1
+# If you want to process only specific probes for LFP or Kilosort modify these lines (empty if you want to skip all probes)
+EXTRACT_LFP_FOR = 0,1
+RUN_KILOSORT_FOR = 0,1
+
+# Optional processing selections
+
+# Bad channel options
+OVERRIDE_BAD_CHANNELS = False
+# MANUAL_BAD_CHANNELS_FILE = path/to/manual_bad_channels.json
+MAX_BAD_CHANNELS = 25
+
+# LFP channel selection options
+OVERRIDE_LFP_CHANNELS = False
+# MANUAL_LFP_CHANNELS_FILE = path/to/manual_lfp_channels.json
+
+# LFP parameters
+LFP_SAMPLE_RATE = 2500
+LFP_HIGH_PASS = 1
+LFP_LOW_PASS = 400
+LFP_SPACING = 100
+INTER_SHANK_SPACE = 250
+
+# High-pass filter parameter for AP band
+AP_HIGH_PASS = 400.0
+
+# Kilosort4 parameters (as JSON)
+KS_PARAMS = {"delete_recording_dat": true, "use_binary_file": true}
+
+# Processing parameters
+LFP_NUM_JOBS = -1
+SI_NUM_JOBS = -1
+CHUNK_DURATION = 1s
