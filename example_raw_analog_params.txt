@@ -1,0 +1,52 @@
+# Raw Analog Signal Extraction Parameters
+# Lines starting with # are comments and will be ignored
+
+# ── Required Parameters ───────────────────────────────────────────────────────
+
+# Path to the original recording directory (contains .nidq.bin and .nidq.meta)
+SOURCE_DIR = E:\STNPilot\Test
+
+# Path to the CatGT output directory
+# The per-channel _raw_times.npy files for TPrime are written here
+CATGT_OUTPUT_DIR = E:\STNPilot\Test\catgt_M511-2024-11-14_g0
+
+# Path where per-channel .mat files will be saved (folder must exist)
+OUTPUT_DIR = E:\STNPilot\Test\preprocessed
+
+# Session identifier used for logging and file naming
+SESSION_ID = M511-2024-11-14
+
+# ── Channel Configuration ─────────────────────────────────────────────────────
+#
+# JSON dict mapping channel name → [high_pass_hz, low_pass_hz, sample_rate_hz]
+# Use the analog channel names as they appear in CatGT / SpikeGLX (XA0–XA7).
+#
+# Any value absent from a channel's list falls back to the global defaults below:
+#   [high_pass, low_pass, sample_rate]  – full specification
+#   [high_pass, low_pass]               – sample rate uses global default
+#   [high_pass]                         – low_pass and sample_rate use global defaults
+#   []                                  – all three use global defaults
+#
+# Examples:
+#   All channels at defaults:
+#     RAW_ANALOG_CHANNELS = {"XA0": [], "XA7": []}
+#
+#   XA0 at 2500 Hz, XA7 at default 1000 Hz:
+#     RAW_ANALOG_CHANNELS = {"XA0": [0.1, 500, 2500], "XA7": []}
+#
+#   XA7 with a different low-pass (e.g. recording LFP-band signal on fiber channel):
+#     RAW_ANALOG_CHANNELS = {"XA7": [0.1, 300, 1000]}
+
+RAW_ANALOG_CHANNELS = {"XA0": [0.1, 500, 1000], "XA7": [0.1, 500, 1000]}
+
+# ── Global Defaults ───────────────────────────────────────────────────────────
+# Applied to any channel whose list is missing a value.
+
+RAW_ANALOG_DEFAULT_HIGH_PASS = 0.1
+RAW_ANALOG_DEFAULT_LOW_PASS = 500.0
+RAW_ANALOG_DEFAULT_SAMPLE_RATE = 1000
+
+# ── Processing Parameters ─────────────────────────────────────────────────────
+
+NUM_JOBS = 4
+CHUNK_DURATION = 1s
