@@ -20,3 +20,7 @@ ANALOG_CHANNELS = {"XA0": [1, 3], "XA1": [1, 3], "XA2": [1, 3], "XA3": [1, 3], "
 # List of digital channels (e.g., XD2, XD3) as comma-separated strings
 DIGITAL_CHANNELS = XD2,XD3
 NUM_ANALOG_CHANNELS = 8
+
+# Optional: additional CatGT flags passed verbatim to the command (JSON list of strings)
+# Example: MANUAL_PARAMS = ["-no_auto_sync", "-no_tshift"]
+MANUAL_PARAMS = []

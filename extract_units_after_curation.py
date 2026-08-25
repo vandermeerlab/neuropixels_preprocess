@@ -27,8 +27,10 @@ DEFAULT_PARAMS = {
     'OUTPUT_DIR': None,        # Required - path to save extracted unit files
     'SESSION_ID': None,        # Required - session identifier
     'PROBE_INDICES': [0],      # List of probe indices to process
-    'SORTER_OUTPUT_FOLDERS': {}, # Dict mapping probe indices to Kilosort/Phy output folders
-    'PREPROCESS_FOLDERS': {},  # Dict mapping probe indices to SI preprocess folders
+    'PROCESSED_BY_SHANK': False, # If True, expect per-shank KS folders and merge into one per-probe .mat
+    'SHANK_INDICES': None,       # Required when PROCESSED_BY_SHANK=True (e.g. 0,1,2,3)
+    'SORTER_OUTPUT_FOLDERS': {}, # Per-probe: {"0": "path"} or per-shank: {"0_shank0": "path", "0_shank1": "path", ...}
+    'PREPROCESS_FOLDERS': {},  # Same key format as SORTER_OUTPUT_FOLDERS
     'SAVE_WAVEFORMS': True,    # Whether to extract and save unit waveforms
     'EXTRACT_GOOD_UNITS': True, # Whether to extract good units
     'EXTRACT_MUA_UNITS': True,  # Whether to extract MUA units
@@ -58,10 +60,13 @@ def parse_params_file(params_file):
                 
                 if key in params:
                     # Handle different parameter types
-                    if key in ['PROBE_INDICES']:
+                    if key in ['PROBE_INDICES', 'SHANK_INDICES']:
                         # Parse list of integers
-                        params[key] = [int(x.strip()) for x in value.split(',')]
-                    elif key in ['SAVE_WAVEFORMS', 'EXTRACT_GOOD_UNITS', 'EXTRACT_MUA_UNITS']:
+                        if value.lower() == 'none' or not value.strip():
+                            params[key] = None
+                        else:
+                            params[key] = [int(x.strip()) for x in value.split(',')]
+                    elif key in ['SAVE_WAVEFORMS', 'EXTRACT_GOOD_UNITS', 'EXTRACT_MUA_UNITS', 'PROCESSED_BY_SHANK']:
                         # Parse boolean
                         params[key] = value.lower() == 'true'
                     elif key == 'NUM_JOBS':
@@ -110,95 +115,91 @@ def setup_logging(output_dir, session_id):
     
     return logging.getLogger(__name__)
 
-def load_bad_channels(catgt_output_dir, probe_idx, logger):
+def load_bad_channels(catgt_output_dir, probe_idx, logger, shank_idx=None):
     """
-    Load bad channel IDs from a JSON file
-    
-    Args:
-        catgt_output_dir: Path to the CatGT output directory
-        probe_idx: Index of the probe
-        logger: Logger object
-    
-    Returns:
-        list: Bad channel IDs or empty list if file not found
+    Load bad channel IDs from a JSON file.
+
+    Reads imec{p}_shank{s}_bad_channels.json when shank_idx is given,
+    otherwise falls back to the legacy imec{p}_bad_channels.json.
     """
     try:
-        # Look for the bad channels JSON file
-        bad_channels_file = os.path.join(catgt_output_dir, f"imec{probe_idx}_bad_channels.json")
-        
+        if shank_idx is not None:
+            bad_channels_file = os.path.join(
+                catgt_output_dir, f"imec{probe_idx}_shank{shank_idx}_bad_channels.json"
+            )
+        else:
+            bad_channels_file = os.path.join(catgt_output_dir, f"imec{probe_idx}_bad_channels.json")
+
         if not os.path.isfile(bad_channels_file):
-            logger.warning(f"Bad channels file not found for probe {probe_idx}: {bad_channels_file}")
+            label = f"probe {probe_idx}" if shank_idx is None else f"probe {probe_idx} shank {shank_idx}"
+            logger.warning(f"Bad channels file not found for {label}: {bad_channels_file}")
             return []
-        
-        # Load the bad channels
+
         with open(bad_channels_file, 'r') as f:
             bad_channels_data = json.load(f)
-        
+
         bad_channel_ids = bad_channels_data.get('bad_channel_ids', [])
-        logger.info(f"Loaded {len(bad_channel_ids)} bad channels for probe {probe_idx}")
+        logger.info(f"Loaded {len(bad_channel_ids)} bad channels from {bad_channels_file}")
         return bad_channel_ids
-        
+
     except Exception as e:
-        logger.error(f"Exception loading bad channels for probe {probe_idx}: {e}")
+        logger.error(f"Exception loading bad channels: {e}")
         return []
 
-def load_recordings_and_sorting(params, probe_idx, logger):
+def load_recordings_and_sorting(params, probe_idx, logger, shank_idx=None, shank_rec=None):
     """
-    Load recordings and sorting data for a specific probe
-    
-    Args:
-        params: Dictionary of parameters
-        probe_idx: Index of the probe to process
-        logger: Logger object
-    
+    Load recordings and sorting data for a probe (or one shank of a probe).
+
+    When shank_idx is given, folder dict keys are expected in "p_shank_s" format
+    (e.g. "0_shank0") and shank_rec is the already-split sub-recording from
+    split_by("group"). Bad channels are loaded from the per-shank JSON.
+
     Returns:
-        tuple: (raw_rec, rec, sorting) where raw_rec is the unfiltered recording,
-               rec is the filtered recording, and sorting is the Kilosort output
+        tuple: (raw_rec, rec, sorting), all None on failure.
     """
     try:
-        # Check if sorter output folder is provided
-        if str(probe_idx) not in params['SORTER_OUTPUT_FOLDERS']:
-            logger.error(f"No sorter output folder specified for probe {probe_idx}")
+        folder_key = f"{probe_idx}_shank{shank_idx}" if shank_idx is not None else str(probe_idx)
+        tag        = f"probe {probe_idx} shank {shank_idx}" if shank_idx is not None else f"probe {probe_idx}"
+
+        if folder_key not in params['SORTER_OUTPUT_FOLDERS']:
+            logger.error(f"No sorter output folder specified for {tag} (key '{folder_key}')")
             return None, None, None
-        
-        sorter_output_folder = params['SORTER_OUTPUT_FOLDERS'][str(probe_idx)]
-        
-        # Check if sorter output folder exists
+
+        sorter_output_folder = params['SORTER_OUTPUT_FOLDERS'][folder_key]
         if not os.path.isdir(sorter_output_folder):
             logger.error(f"Sorter output folder does not exist: {sorter_output_folder}")
             return None, None, None
-        
-        # Load the raw recording (catgt output)
-        logger.info(f"Loading raw recording for probe {probe_idx}...")
-        raw_rec = si.read_spikeglx(params['CATGT_OUTPUT_DIR'], stream_name=f"imec{probe_idx}.ap")
-        
-        # Load bad channels
-        bad_channel_ids = load_bad_channels(params['CATGT_OUTPUT_DIR'], probe_idx, logger)
-        
-        # Filter and remove bad channels
-        logger.info(f"Removing bad channels...")
+
+        # Raw recording: use the provided shank sub-recording or read the full probe
+        if shank_rec is not None:
+            raw_rec = shank_rec
+        else:
+            logger.info(f"Loading raw recording for {tag}...")
+            raw_rec = si.read_spikeglx(params['CATGT_OUTPUT_DIR'], stream_name=f"imec{probe_idx}.ap")
+
+        bad_channel_ids = load_bad_channels(
+            params['CATGT_OUTPUT_DIR'], probe_idx, logger, shank_idx=shank_idx
+        )
+
+        logger.info(f"Removing {len(bad_channel_ids)} bad channels for {tag}...")
         rec = raw_rec.remove_channels(bad_channel_ids)
-        
-        # Load the Kilosort sorting output
-        logger.info(f"Loading Kilosort sorting output...")
-        sorting = si.KiloSortSortingExtractor(folder_path=sorter_output_folder)
-        
-        # Register the recording with the sorting
-        if str(probe_idx) in params['PREPROCESS_FOLDERS']:
-            # If a preprocessed recording binary is specified, use that
-            preprocess_folder = params['PREPROCESS_FOLDERS'][str(probe_idx)]
+
+        logger.info(f"Loading Kilosort sorting output for {tag}...")
+        sorting = si.read_kilosort(folder_path=sorter_output_folder)
+
+        if folder_key in params['PREPROCESS_FOLDERS']:
+            preprocess_folder = params['PREPROCESS_FOLDERS'][folder_key]
             binary_file = os.path.join(preprocess_folder, "traces_cached_seg0.raw")
-            
+
             if os.path.isfile(binary_file):
                 logger.info(f"Loading preprocessed recording from {binary_file}...")
                 this_rec = si.read_binary(
-                    binary_file, 
+                    binary_file,
                     sampling_frequency=rec.get_sampling_frequency(),
-                    dtype='int16', 
+                    dtype='int16',
                     num_channels=rec.get_num_channels()
                 )
-                
-                # Copy properties and annotations
+
                 this_rec.annotate(is_filtered=rec.is_filtered())
                 for key in rec.get_property_keys():
                     this_rec.set_property(key, rec.get_property(key))
@@ -208,21 +209,18 @@ def load_recordings_and_sorting(params, probe_idx, logger):
                     this_rec.annotate(probes_info=rec.get_annotation('probes_info'))
                 if 'probe_0_planar_contour' in rec.get_annotation_keys():
                     this_rec.annotate(probe_0_planar_contour=rec.get_annotation('probe_0_planar_contour'))
-                
-                # Verify the durations match (are close)
+
                 if not np.isclose(rec.get_total_duration(), this_rec.get_total_duration()):
-                    logger.error(f"Duration mismatch between raw and preprocessed recordings!")
+                    logger.error(f"Duration mismatch between raw and preprocessed recordings for {tag}!")
                     return None, None, None
-                
+
                 rec = this_rec
-        
-        # Register the recording with the sorting
+
         sorting.register_recording(rec)
-        
         return raw_rec, rec, sorting
-        
+
     except Exception as e:
-        logger.error(f"Exception loading recordings and sorting for probe {probe_idx}: {e}")
+        logger.error(f"Exception loading recordings and sorting for {tag}: {e}")
         return None, None, None
 
 def extract_units(rec, sorting, unit_type, probe_idx, params, logger):
@@ -253,25 +251,11 @@ def extract_units(rec, sorting, unit_type, probe_idx, params, logger):
         units = sorting.select_units(keep_units)
         logger.info(f"Found {len(keep_units)} {unit_type} units for probe {probe_idx}")
         
-        # Extract channel information
-        units_ch = [f"imec{probe_idx}.ap#AP" + str(x) for x in units.get_property('ch')]
-        rec_ch = [f"imec{probe_idx}.ap#" + str(x) for x in rec.get_property('channel_names')]
-        
-        # Find indices of unit channels in the recording
-        keep = []
-        for ch in units_ch:
-            match = np.where(np.array(rec_ch) == ch)[0]
-            if len(match) > 0:
-                keep.append(match[0])
-            else:
-                logger.warning(f"Channel {ch} not found in recording channels")
-        
-        if len(keep) != len(units_ch):
-            logger.warning(f"Some channels were not found in the recording")
-            keep_idx = keep_idx[:len(keep)]
-            keep_units = sorting.unit_ids[keep_idx]
-            units = sorting.select_units(keep_units)
-            units_ch = [f"imec{probe_idx}.ap#AP" + str(x) for x in units.get_property('ch')]
+        # ch values are 0-based indices into the recording (KS ran on the bad-channel-removed rec).
+        # rec.channel_ids are integers [0, 1, 2, ...] so ch IS the index — no string matching needed.
+        ch_indices = units.get_property('ch')
+        units_ch = [rec.channel_ids[x] for x in ch_indices]
+        keep = list(ch_indices)
         
         # Extract spike trains
         spike_train = [units.get_unit_spike_train(x)/units.get_sampling_frequency() 
@@ -279,7 +263,7 @@ def extract_units(rec, sorting, unit_type, probe_idx, params, logger):
         
         # Process unit IDs and metadata
         unit_ids = [f"imec{probe_idx}_{str(x)}" for x in keep_units]
-        depths = units.get_property('depth')
+        depths = units.get_property('depth') + 175 # EFBG - Add 175 um to convert from probe tip to first row - aligns with LFP depths
         
         # Get channel locations and calculate shank IDs
         all_locs = rec.get_channel_locations()
@@ -382,6 +366,24 @@ def save_units(units_data, output_dir, probe_idx, unit_type, logger):
         logger.error(f"Exception saving {unit_type} units for probe {probe_idx}: {e}")
         return False
 
+def merge_unit_dicts(shank_dicts):
+    """
+    Merge a list of per-shank unit dicts into a single per-probe dict.
+    List fields are extended; numpy arrays are concatenated.
+    """
+    merged = {}
+    for key in shank_dicts[0].keys():
+        values = [d[key] for d in shank_dicts]
+        sample = values[0]
+        if isinstance(sample, np.ndarray):
+            merged[key] = np.concatenate(values)
+        elif isinstance(sample, list):
+            merged[key] = [item for sublist in values for item in sublist]
+        else:
+            merged[key] = values
+    return merged
+
+
 def process_probe(probe_idx, params, logger):
     """
     Process a single probe: extract good and MUA units
@@ -395,40 +397,87 @@ def process_probe(probe_idx, params, logger):
         bool: True if successful, False otherwise
     """
     logger.info(f"Processing probe {probe_idx}...")
-    
+
     try:
-        # Load recordings and sorting data
-        raw_rec, rec, sorting = load_recordings_and_sorting(params, probe_idx, logger)
-        if rec is None or sorting is None:
-            logger.error(f"Failed to load recordings and sorting for probe {probe_idx}")
-            return False
-        
-        all_successful = True
-        
-        # Extract good units if requested
-        if params['EXTRACT_GOOD_UNITS']:
-            logger.info(f"Extracting good units for probe {probe_idx}...")
-            good_units = extract_units(rec, sorting, 'good', probe_idx, params, logger)
-            
-            # Save good units
-            if good_units is not None:
-                success = save_units(good_units, params['OUTPUT_DIR'], probe_idx, 'clean', logger)
-                if not success:
-                    all_successful = False
-        
-        # Extract MUA units if requested
-        if params['EXTRACT_MUA_UNITS']:
-            logger.info(f"Extracting MUA units for probe {probe_idx}...")
-            mua_units = extract_units(rec, sorting, 'mua', probe_idx, params, logger)
-            
-            # Save MUA units
-            if mua_units is not None:
-                success = save_units(mua_units, params['OUTPUT_DIR'], probe_idx, 'mua', logger)
-                if not success:
-                    all_successful = False
-        
-        return all_successful
-        
+        if params['PROCESSED_BY_SHANK']:
+            # ── Per-shank mode: load each shank's sorting, merge into one per-probe output ──
+            if not params['SHANK_INDICES']:
+                logger.error("PROCESSED_BY_SHANK=True but SHANK_INDICES is not set in params file")
+                return False
+            logger.info(f"Per-shank mode: loading probe {probe_idx} recording for splitting...")
+            full_rec   = si.read_spikeglx(params['CATGT_OUTPUT_DIR'], stream_name=f"imec{probe_idx}.ap")
+            shank_recs = full_rec.split_by("group")
+
+            good_shank_dicts = []
+            mua_shank_dicts  = []
+
+            for shank_idx in params['SHANK_INDICES']:
+                if shank_idx not in shank_recs:
+                    logger.warning(f"Shank {shank_idx} not found in recording groups, skipping")
+                    continue
+
+                logger.info(f"--- Loading probe {probe_idx} shank {shank_idx} ---")
+                _, rec, sorting = load_recordings_and_sorting(
+                    params, probe_idx, logger,
+                    shank_idx=shank_idx, shank_rec=shank_recs[shank_idx]
+                )
+                if rec is None or sorting is None:
+                    logger.error(f"Failed to load data for probe {probe_idx} shank {shank_idx}, skipping")
+                    continue
+
+                if params['EXTRACT_GOOD_UNITS']:
+                    good = extract_units(rec, sorting, 'good', probe_idx, params, logger)
+                    if good is not None:
+                        good_shank_dicts.append(good)
+
+                if params['EXTRACT_MUA_UNITS']:
+                    mua = extract_units(rec, sorting, 'mua', probe_idx, params, logger)
+                    if mua is not None:
+                        mua_shank_dicts.append(mua)
+
+            all_successful = True
+
+            if params['EXTRACT_GOOD_UNITS']:
+                if good_shank_dicts:
+                    merged = merge_unit_dicts(good_shank_dicts)
+                    if not save_units(merged, params['OUTPUT_DIR'], probe_idx, 'clean', logger):
+                        all_successful = False
+                else:
+                    logger.info(f"No good units found across any shank for probe {probe_idx}")
+
+            if params['EXTRACT_MUA_UNITS']:
+                if mua_shank_dicts:
+                    merged = merge_unit_dicts(mua_shank_dicts)
+                    if not save_units(merged, params['OUTPUT_DIR'], probe_idx, 'mua', logger):
+                        all_successful = False
+                else:
+                    logger.info(f"No MUA units found across any shank for probe {probe_idx}")
+
+            return all_successful
+
+        else:
+            # ── Legacy per-probe mode ─────────────────────────────────────────────────────
+            raw_rec, rec, sorting = load_recordings_and_sorting(params, probe_idx, logger)
+            if rec is None or sorting is None:
+                logger.error(f"Failed to load recordings and sorting for probe {probe_idx}")
+                return False
+
+            all_successful = True
+
+            if params['EXTRACT_GOOD_UNITS']:
+                good_units = extract_units(rec, sorting, 'good', probe_idx, params, logger)
+                if good_units is not None:
+                    if not save_units(good_units, params['OUTPUT_DIR'], probe_idx, 'clean', logger):
+                        all_successful = False
+
+            if params['EXTRACT_MUA_UNITS']:
+                mua_units = extract_units(rec, sorting, 'mua', probe_idx, params, logger)
+                if mua_units is not None:
+                    if not save_units(mua_units, params['OUTPUT_DIR'], probe_idx, 'mua', logger):
+                        all_successful = False
+
+            return all_successful
+
     except Exception as e:
         logger.error(f"Exception processing probe {probe_idx}: {e}")
         return False

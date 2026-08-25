@@ -36,9 +36,13 @@ DEFAULT_PARAMS = {
     'ALIGN_EVENTS': True,      # Whether to align events
     'ALIGN_SPIKES': False,     # Whether to align spike times
     'ALIGN_LFP': False,        # Whether to align LFP times
+    'ALIGN_RAW_ANALOG': False, # Whether to align raw analog channel time vectors
     'ANALOG_CHANNELS': ['XA0', 'XA1', 'XA2', 'XA3', 'XA4', 'XA5', 'XA6', 'XA7'],
     'DIGITAL_CHANNELS': ['XD2', 'XD3'],
-    'KS_OUTPUT_FOLDERS': {},   # Dict mapping probe indices to Kilosort output folders
+    'RAW_ANALOG_CHANNELS': [], # Channels whose _raw_times.npy files should be aligned
+    'KS_OUTPUT_FOLDERS': {},   # Dict mapping probe/shank keys to Kilosort output folders
+    'PROCESSED_BY_SHANK': False,  # True if KS was run per-shank (Quadbase)
+    'SHANK_INDICES': None,        # List of shank indices when PROCESSED_BY_SHANK=True
     'CHECK_INTERVAL': 15,      # Time in seconds between checks for TPrime process
     'TIMEOUT': 300             # Maximum time to wait for TPrime to complete (seconds)
 }
@@ -72,21 +76,27 @@ def parse_params_file(params_file):
                     elif key == 'TO_PROBE':
                         # Parse integer
                         params[key] = int(value)
-                    elif key in ['ALIGN_EVENTS', 'ALIGN_SPIKES', 'ALIGN_LFP']:
+                    elif key in ['ALIGN_EVENTS', 'ALIGN_SPIKES', 'ALIGN_LFP', 'ALIGN_RAW_ANALOG']:
                         # Parse boolean
                         params[key] = value.lower() == 'true'
                     elif key in ['CHECK_INTERVAL', 'TIMEOUT']:
                         # Parse integer
                         params[key] = int(value)
-                    elif key in ['ANALOG_CHANNELS', 'DIGITAL_CHANNELS']:
+                    elif key in ['ANALOG_CHANNELS', 'DIGITAL_CHANNELS', 'RAW_ANALOG_CHANNELS']:
                         # Parse list of strings
                         if value.lower() == 'none':
                             params[key] = []
                         else:
                             params[key] = [x.strip() for x in value.split(',')]
                     elif key == 'KS_OUTPUT_FOLDERS':
-                        # Parse JSON dictionary mapping probe indices to folder paths
                         params[key] = json.loads(value)
+                    elif key == 'PROCESSED_BY_SHANK':
+                        params[key] = value.lower() == 'true'
+                    elif key == 'SHANK_INDICES':
+                        if value.lower() == 'none':
+                            params[key] = None
+                        else:
+                            params[key] = [int(x.strip()) for x in value.split(',')]
                     else:
                         # String parameters
                         params[key] = value
@@ -104,12 +114,22 @@ def parse_params_file(params_file):
         if params['TO_PROBE'] not in params['PROBE_INDICES']:
             raise ValueError(f"TO_PROBE ({params['TO_PROBE']}) must be in PROBE_INDICES ({params['PROBE_INDICES']})")
         
-        # If aligning spikes, check that KS_OUTPUT_FOLDERS is provided for all from_probes
+        # If aligning spikes, check that KS_OUTPUT_FOLDERS is provided for all from_probes/shanks
         if params['ALIGN_SPIKES']:
             from_probes = [p for p in params['PROBE_INDICES'] if p != params['TO_PROBE']]
-            missing_folders = [p for p in from_probes if str(p) not in params['KS_OUTPUT_FOLDERS']]
+            if params['PROCESSED_BY_SHANK']:
+                if not params['SHANK_INDICES']:
+                    raise ValueError("PROCESSED_BY_SHANK=True but SHANK_INDICES is not set")
+                missing_folders = [
+                    f"{p}_shank{s}"
+                    for p in from_probes
+                    for s in params['SHANK_INDICES']
+                    if f"{p}_shank{s}" not in params['KS_OUTPUT_FOLDERS']
+                ]
+            else:
+                missing_folders = [str(p) for p in from_probes if str(p) not in params['KS_OUTPUT_FOLDERS']]
             if missing_folders:
-                raise ValueError(f"KS_OUTPUT_FOLDERS missing for probes: {missing_folders}")
+                raise ValueError(f"KS_OUTPUT_FOLDERS missing entries: {missing_folders}")
         
         return params
         
@@ -136,6 +156,26 @@ def setup_logging(output_dir, session_id):
     )
     
     return logging.getLogger(__name__)
+
+def find_probe_sync_file(probe_idx, file_list, logger):
+    """
+    Find the AP sync file for a given probe, trying both standard NPX2 (384 ch)
+    and Quadbase (1539 ch) filename patterns.
+
+    Returns the matching path, or None if not found.
+    """
+    patterns = [
+        f"imec{probe_idx}.ap.xd_384_6_500.txt",   # NPX2 standard
+        f"imec{probe_idx}.ap.xd_1539_6_500.txt",  # NPX2 Quadbase
+    ]
+    for pat in patterns:
+        matches = [f for f in file_list if f.endswith(pat)]
+        if matches:
+            logger.info(f"Found probe {probe_idx} sync file: {matches[0]}")
+            return matches[0]
+    logger.error(f"No sync file found for probe {probe_idx} (tried: {patterns})")
+    return None
+
 
 def find_nidq_sync_files(catgt_output_dir, logger):
     """
@@ -200,29 +240,14 @@ def find_sync_files(catgt_output_dir, to_probe, from_probe, logger):
             for file in files:
                 file_list.append(os.path.join(root, file))
         
-        # Look for to_probe sync file (always with .xd_384_6_500.txt suffix)
-        to_file_pattern = f"imec{to_probe}.ap.xd_384_6_500.txt"
-        to_files = [f for f in file_list if f.endswith(to_file_pattern)]
-        
-        if not to_files:
-            logger.error(f"No sync file found for to_probe={to_probe}")
+        to_file = find_probe_sync_file(to_probe, file_list, logger)
+        if to_file is None:
             return None, None
-        
-        to_file = to_files[0]
-        
-        # Look for from_probe sync file (always with .xd_384_6_500.txt suffix)
-        from_file_pattern = f"imec{from_probe}.ap.xd_384_6_500.txt"
-        from_files = [f for f in file_list if f.endswith(from_file_pattern)]
-        
-        if not from_files:
-            logger.error(f"No sync file found for from_probe={from_probe}")
+
+        from_file = find_probe_sync_file(from_probe, file_list, logger)
+        if from_file is None:
             return None, None
-        
-        from_file = from_files[0]
-        
-        logger.info(f"Found to_file: {to_file}")
-        logger.info(f"Found from_file: {from_file}")
-        
+
         return to_file, from_file
         
     except Exception as e:
@@ -357,29 +382,23 @@ def generate_align_events_command(params, to_file, from_file, logger):
     
     return full_command, output_files
 
-def generate_align_spikes_command(params, to_file, from_file, from_probe, logger):
+def generate_align_spikes_command(params, to_file, from_file, from_probe, logger, folder_key=None):
     """
-    Generate a TPrime command to align spike times from Kilosort output
-    
-    Args:
-        params: Dictionary of parameters
-        to_file: Path to the reference probe sync file
-        from_file: Path to the probe to be aligned sync file
-        from_probe: Index of the probe to be aligned
-        logger: Logger object
-    
-    Returns:
-        tuple: (command, sorter_output_folder, output_files) TPrime command, sorter output folder, and expected output files
+    Generate a TPrime command to align spike times from Kilosort output.
+
+    folder_key: key into KS_OUTPUT_FOLDERS (e.g. "0" for legacy, "0_shank2" for shank mode).
+                Defaults to str(from_probe) when not provided.
     """
-    # Platform-specific settings
     is_windows = platform.system() == "Windows"
     tprime_exe = os.path.join(params['TPRIME_PATH'], "TPrime.exe" if is_windows else "runit.sh")
-    
-    # Get the sorter output folder for this probe
+
+    if folder_key is None:
+        folder_key = str(from_probe)
+
     try:
-        sorter_output_folder = params['KS_OUTPUT_FOLDERS'][str(from_probe)]
+        sorter_output_folder = params['KS_OUTPUT_FOLDERS'][folder_key]
     except KeyError:
-        logger.error(f"No Kilosort output folder specified for probe {from_probe}")
+        logger.error(f"No Kilosort output folder for key '{folder_key}' in KS_OUTPUT_FOLDERS")
         return None, None, None
     
     # Make sure the sorter_output_folder exists
@@ -422,43 +441,94 @@ def generate_align_spikes_command(params, to_file, from_file, from_probe, logger
     
     return command, sorter_output_folder, output_files
 
-def generate_align_lfp_command(params, to_file, from_file, from_probe, logger):
+def generate_align_lfp_command(params, to_file, from_file, from_probe, logger, shank_indices=None):
     """
-    Generate a TPrime command to align LFP times
-    
+    Generate a TPrime command to align LFP times.
+
+    shank_indices: None  -> legacy mode, one file per probe (imec{p}_lfp_times.npy)
+                   list  -> shank mode, one file per shank batched into a single call
+                            (imec{p}_shank{s}_lfp_times.npy for each s in shank_indices)
+    """
+    is_windows = platform.system() == "Windows"
+    tprime_exe = os.path.join(params['TPRIME_PATH'], "TPrime.exe" if is_windows else "runit.sh")
+
+    command_base = f"{tprime_exe} -syncperiod=1.0 -tostream={to_file} -fromstream=5,{from_file}"
+    output_files = []
+    events_params = ""
+
+    if shank_indices is None:
+        lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_lfp_times.npy")
+        adj_lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_adj_lfp_times.npy")
+        if not os.path.isfile(lfp_times_path):
+            logger.error(f"LFP times file not found: {lfp_times_path}")
+            return None, None
+        events_params += f" -events=5,{lfp_times_path},{adj_lfp_times_path}"
+        output_files.append(adj_lfp_times_path)
+    else:
+        for s in shank_indices:
+            lfp_times_path = os.path.join(
+                params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_shank{s}_lfp_times.npy")
+            adj_lfp_times_path = os.path.join(
+                params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_shank{s}_adj_lfp_times.npy")
+            if not os.path.isfile(lfp_times_path):
+                logger.warning(f"LFP times file not found for shank {s}: {lfp_times_path} - skipping")
+                continue
+            events_params += f" -events=5,{lfp_times_path},{adj_lfp_times_path}"
+            output_files.append(adj_lfp_times_path)
+        if not output_files:
+            logger.error(f"No shank LFP time files found for probe {from_probe}")
+            return None, None
+
+    return f"{command_base}{events_params}", output_files
+
+def generate_align_raw_analog_command(params, to_file, nidq_sync_file, logger):
+    """
+    Generate a TPrime command to align raw analog channel time vectors.
+
+    All requested channels are batched into a single TPrime call, each as a
+    separate -events argument, using the NIDQ sync file as the fromstream
+    (same approach as event alignment).
+
     Args:
         params: Dictionary of parameters
         to_file: Path to the reference probe sync file
-        from_file: Path to the probe to be aligned sync file
-        from_probe: Index of the probe to be aligned
+        nidq_sync_file: Path to the NIDQ sync file
         logger: Logger object
-    
+
     Returns:
-        tuple: (command, output_files) TPrime command and list of expected output files
+        tuple: (command, output_files) or (None, None) on error
     """
-    # Platform-specific settings
+    if not params['RAW_ANALOG_CHANNELS']:
+        logger.error("ALIGN_RAW_ANALOG is True but RAW_ANALOG_CHANNELS is empty")
+        return None, None
+
+    if nidq_sync_file is None:
+        logger.error("Cannot align raw analog channels: NIDQ sync file not found")
+        return None, None
+
     is_windows = platform.system() == "Windows"
     tprime_exe = os.path.join(params['TPRIME_PATH'], "TPrime.exe" if is_windows else "runit.sh")
-    
-    # Input and output paths for LFP times
-    lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_lfp_times.npy")
-    adj_lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_adj_lfp_times.npy")
-    
-    # Check if the input file exists
-    if not os.path.isfile(lfp_times_path):
-        logger.error(f"LFP times file not found: {lfp_times_path}")
-        return None, None
-    
-    # Expected output files
-    output_files = [adj_lfp_times_path]
-    
-    # Generate the TPrime command
-    command = (
-        f"{tprime_exe} -syncperiod=1.0 -tostream={to_file} -fromstream=5,{from_file} "
-        f"-events=5,{lfp_times_path},{adj_lfp_times_path}"
-    )
-    
-    return command, output_files
+
+    command = f"{tprime_exe} -syncperiod=1.0 -tostream={to_file} -fromstream=5,{nidq_sync_file}"
+
+    output_files = []
+    events_params = ""
+
+    for channel in params['RAW_ANALOG_CHANNELS']:
+        raw_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"{channel}_raw_times.npy")
+        adj_raw_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"{channel}_adj_raw_times.npy")
+
+        if not os.path.isfile(raw_times_path):
+            logger.error(f"Raw times file not found for channel {channel}: {raw_times_path}")
+            return None, None
+
+        events_params += f" -events=5,{raw_times_path},{adj_raw_times_path}"
+        output_files.append(adj_raw_times_path)
+        logger.info(f"  {channel}: {raw_times_path} -> {adj_raw_times_path}")
+
+    full_command = f"{command}{events_params}"
+    return full_command, output_files
+
 
 def process_spike_time_adjustment(sorter_output_folder, logger):
     """
@@ -644,139 +714,204 @@ def run_tprime_command(command, output_files, check_interval=15, timeout=300, lo
             
         return False
 
-def align_probe(to_probe, from_probe, params, logger):
+def align_nidq_channels(to_probe, params, logger):
     """
-    Align one probe to a reference probe
-    
+    Align NIDQ-sourced data (events and raw analog channels) to the reference probe.
+
+    This only requires the reference probe's sync file and the NIDQ sync file —
+    no from_probe is needed. It runs once per session regardless of how many probes
+    are present, including single-probe recordings.
+
     Args:
         to_probe: Index of the reference probe
-        from_probe: Index of the probe to be aligned
         params: Dictionary of parameters
         logger: Logger object
-    
+
     Returns:
-        bool: True if all alignment operations were successful, False otherwise
+        bool: True if all requested NIDQ alignments succeeded, False otherwise
     """
-    logger.info(f"Aligning probe {from_probe} to reference probe {to_probe}")
-    
-    # Find sync files for the two probes
-    to_file, from_file = find_sync_files(params['CATGT_OUTPUT_DIR'], to_probe, from_probe, logger)
-    if to_file is None or from_file is None:
-        logger.error(f"Cannot align probe {from_probe} to {to_probe}: sync files not found")
+    logger.info(f"Aligning NIDQ channels to reference probe {to_probe}...")
+
+    # Build file list once, then use the shared helper for probe sync file discovery
+    file_list = []
+    for root, _, files in os.walk(params['CATGT_OUTPUT_DIR']):
+        for f in files:
+            file_list.append(os.path.join(root, f))
+
+    to_file = find_probe_sync_file(to_probe, file_list, logger)
+    if to_file is None:
         return False
-    
-    # Find nidq sync file
+
+    # Find NIDQ sync file
     nidq_sync_file = find_nidq_sync_files(params['CATGT_OUTPUT_DIR'], logger)
-    
+
     all_successful = True
-    
-    # Align events if requested
+
+    # Align events (analog + digital channels from NIDQ)
     if params['ALIGN_EVENTS']:
-        logger.info(f"Aligning events for probe {from_probe}...")
-        events_command, output_files = generate_align_events_command(params, to_file, nidq_sync_file, logger)
+        logger.info("Aligning NIDQ events...")
+        events_command, output_files = generate_align_events_command(
+            params, to_file, nidq_sync_file, logger)
         if events_command is None:
             logger.error("Failed to generate events alignment command")
             all_successful = False
         else:
             events_success = run_tprime_command(
-                events_command, 
-                output_files, 
+                events_command,
+                output_files,
                 check_interval=params['CHECK_INTERVAL'],
                 timeout=params['TIMEOUT'],
                 logger=logger
             )
             if not events_success:
-                logger.error(f"Events alignment failed for probe {from_probe}")
+                logger.error("Events alignment failed")
                 all_successful = False
-    
-    # Align spike times if requested
-    if params['ALIGN_SPIKES']:
-        logger.info(f"Aligning spike times for probe {from_probe}...")
-        spikes_command, sorter_output_folder, output_files = generate_align_spikes_command(
-            params, to_file, from_file, from_probe, logger)
-        
-        if spikes_command is None or sorter_output_folder is None:
-            logger.error("Failed to generate spike times alignment command")
+
+    # Align raw analog channel time vectors
+    if params['ALIGN_RAW_ANALOG']:
+        logger.info("Aligning raw analog channel times (using NIDQ sync)...")
+        raw_analog_command, output_files = generate_align_raw_analog_command(
+            params, to_file, nidq_sync_file, logger)
+        if raw_analog_command is None:
+            logger.error("Failed to generate raw analog alignment command")
             all_successful = False
         else:
-            spikes_success = run_tprime_command(
-                spikes_command, 
-                output_files, 
+            raw_analog_success = run_tprime_command(
+                raw_analog_command,
+                output_files,
                 check_interval=params['CHECK_INTERVAL'],
                 timeout=params['TIMEOUT'],
                 logger=logger
             )
+            if not raw_analog_success:
+                logger.error("Raw analog channel time alignment failed")
+                all_successful = False
+
+    return all_successful
+
+
+def align_probe(to_probe, from_probe, params, logger):
+    """
+    Align spike times and LFP from one probe to the reference probe.
+
+    This requires sync files for both probes. NIDQ-based alignment (events,
+    raw analog) is handled separately by align_nidq_channels.
+
+    Args:
+        to_probe: Index of the reference probe
+        from_probe: Index of the probe to be aligned
+        params: Dictionary of parameters
+        logger: Logger object
+
+    Returns:
+        bool: True if all alignment operations were successful, False otherwise
+    """
+    logger.info(f"Aligning probe {from_probe} to reference probe {to_probe}")
+
+    # Find sync files for the two probes
+    to_file, from_file = find_sync_files(params['CATGT_OUTPUT_DIR'], to_probe, from_probe, logger)
+    if to_file is None or from_file is None:
+        logger.error(f"Cannot align probe {from_probe} to {to_probe}: sync files not found")
+        return False
+
+    all_successful = True
+    by_shank = params['PROCESSED_BY_SHANK']
+    shank_indices = params['SHANK_INDICES'] if by_shank else None
+
+    # Align spike times
+    if params['ALIGN_SPIKES']:
+        shank_list = shank_indices if by_shank else [None]
+        for s in shank_list:
+            label = f"probe {from_probe}" + (f" shank {s}" if s is not None else "")
+            folder_key = f"{from_probe}_shank{s}" if s is not None else None
+            logger.info(f"Aligning spike times for {label}...")
+            spikes_command, sorter_output_folder, output_files = generate_align_spikes_command(
+                params, to_file, from_file, from_probe, logger, folder_key=folder_key)
+            if spikes_command is None or sorter_output_folder is None:
+                logger.error(f"Failed to generate spike times alignment command for {label}")
+                all_successful = False
+                continue
+            spikes_success = run_tprime_command(
+                spikes_command, output_files,
+                check_interval=params['CHECK_INTERVAL'],
+                timeout=params['TIMEOUT'], logger=logger)
             if not spikes_success:
-                logger.error(f"Spike times alignment failed for probe {from_probe}")
+                logger.error(f"Spike times alignment failed for {label}")
                 all_successful = False
             else:
-                # Process spike time adjustment (cleanup and conversion)
                 cleanup_success = process_spike_time_adjustment(sorter_output_folder, logger)
                 if not cleanup_success:
-                    logger.error(f"Spike times adjustment cleanup failed for probe {from_probe}")
+                    logger.error(f"Spike times adjustment cleanup failed for {label}")
                     all_successful = False
-    
-    # Align LFP times if requested
+
+    # Align LFP times (shank mode: all shanks batched into one TPrime call)
     if params['ALIGN_LFP']:
-        logger.info(f"Aligning LFP times for probe {from_probe}...")
-        lfp_command, output_files = generate_align_lfp_command(params, to_file, from_file, from_probe, logger)
-        
+        logger.info(f"Aligning LFP times for probe {from_probe}" +
+                    (f" (shanks {shank_indices})" if by_shank else "") + "...")
+        lfp_command, output_files = generate_align_lfp_command(
+            params, to_file, from_file, from_probe, logger,
+            shank_indices=shank_indices)
         if lfp_command is None:
-            logger.error("Failed to generate LFP times alignment command")
+            logger.error(f"Failed to generate LFP times alignment command for probe {from_probe}")
             all_successful = False
         else:
             lfp_success = run_tprime_command(
-                lfp_command, 
-                output_files, 
+                lfp_command, output_files,
                 check_interval=params['CHECK_INTERVAL'],
-                timeout=params['TIMEOUT'],
-                logger=logger
-            )
+                timeout=params['TIMEOUT'], logger=logger)
             if not lfp_success:
                 logger.error(f"LFP times alignment failed for probe {from_probe}")
                 all_successful = False
-    
+
     return all_successful
+
 
 def process_session(params_file):
     """Process a single session with the given parameters"""
-    # Parse parameters
     params = parse_params_file(params_file)
-    
-    # Setup logging
+
     logger = setup_logging(params['OUTPUT_DIR'], params['SESSION_ID'])
-    
+
     logger.info(f"Processing session: {params['SESSION_ID']}")
     logger.info(f"Parameters file: {params_file}")
     logger.info(f"CatGT output directory: {params['CATGT_OUTPUT_DIR']}")
     logger.info(f"Output directory: {params['OUTPUT_DIR']}")
     logger.info(f"Reference probe (to_probe): {params['TO_PROBE']}")
-    logger.info(f"Probes to align: {[p for p in params['PROBE_INDICES'] if p != params['TO_PROBE']]}")
-    
-    # Make sure output directory exists
+    from_probes = [p for p in params['PROBE_INDICES'] if p != params['TO_PROBE']]
+    logger.info(f"Probes to align: {from_probes}")
+
     os.makedirs(params['OUTPUT_DIR'], exist_ok=True)
-    
-    # Process each probe (except the reference)
+
     all_success = True
-    for probe_idx in params['PROBE_INDICES']:
-        # Skip the reference probe
-        if probe_idx == params['TO_PROBE']:
+
+    # Step 1: NIDQ-based alignment (events + raw analog).
+    # Runs once regardless of probe count — works even with a single probe.
+    if params['ALIGN_EVENTS'] or params['ALIGN_RAW_ANALOG']:
+        nidq_success = align_nidq_channels(params['TO_PROBE'], params, logger)
+        if not nidq_success:
+            all_success = False
+            logger.warning("NIDQ channel alignment completed with errors")
+
+    # Step 2: Probe-to-probe alignment (spikes + LFP) for each non-reference probe.
+    for probe_idx in from_probes:
+        if not (params['ALIGN_SPIKES'] or params['ALIGN_LFP']):
+            logger.info(f"No spike or LFP alignment requested for probe {probe_idx}, skipping")
             continue
-        
+
         success = align_probe(params['TO_PROBE'], probe_idx, params, logger)
         if not success:
             all_success = False
-            logger.warning(f"Alignment failed or was skipped for probe {probe_idx}")
+            logger.warning(f"Probe alignment failed or was skipped for probe {probe_idx}")
         else:
-            logger.info(f"Alignment completed successfully for probe {probe_idx}")
-    
+            logger.info(f"Probe alignment completed successfully for probe {probe_idx}")
+
     if all_success:
-        logger.info(f"All probes aligned successfully for session {params['SESSION_ID']}")
-        print(f"\nAll probes aligned successfully for session {params['SESSION_ID']}!")
+        logger.info(f"All alignment completed successfully for session {params['SESSION_ID']}")
+        print(f"\nAll alignment completed successfully for session {params['SESSION_ID']}!")
     else:
-        logger.warning(f"Alignment completed with warnings or errors for some probes in session {params['SESSION_ID']}")
-        print(f"\nAlignment completed with warnings or errors for some probes in session {params['SESSION_ID']}. Check the log file for details.")
-    
+        logger.warning(f"Alignment completed with warnings or errors for session {params['SESSION_ID']}")
+        print(f"\nAlignment completed with warnings or errors for session {params['SESSION_ID']}. Check the log file for details.")
+
     return all_success
 
 def main():

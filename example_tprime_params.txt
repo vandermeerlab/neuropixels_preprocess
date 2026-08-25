@@ -25,6 +25,8 @@ TO_PROBE=0
 ALIGN_EVENTS=True
 ALIGN_SPIKES=True
 ALIGN_LFP=True
+# Set to True if you ran extract_raw_analog_signals.py and want to align those time vectors
+ALIGN_RAW_ANALOG=False
 
 # Channels to align - analog (comma-separated)
 ANALOG_CHANNELS=XA0,XA1,XA2,XA3,XA4,XA5,XA6,XA7
@@ -32,8 +34,22 @@ ANALOG_CHANNELS=XA0,XA1,XA2,XA3,XA4,XA5,XA6,XA7
 # Channels to align - digital (comma-separated)
 DIGITAL_CHANNELS=XD2,XD3
 
-# Kilosort output folders (JSON format mapping probe indices to folder paths)
+# Raw analog channels to align (comma-separated, must match names used in extract_raw_analog_signals.py)
+# Only used when ALIGN_RAW_ANALOG=True
+RAW_ANALOG_CHANNELS=XA0,XA7
+
+# Set to True if data was sorted per-shank (e.g. Quadbase via extract_lfp_and_run_ks4_by_shank.py)
+# When True, SHANK_INDICES must also be set and KS_OUTPUT_FOLDERS must use "{probe}_shank{shank}" keys.
+PROCESSED_BY_SHANK=False
+
+# Required when PROCESSED_BY_SHANK=True: shanks to process (comma-separated)
+# SHANK_INDICES=0,1,2,3
+
+# Kilosort output folders (JSON format)
+# Legacy per-probe keys (use when PROCESSED_BY_SHANK=False):
 KS_OUTPUT_FOLDERS={"1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
+# Per-shank keys (use instead when PROCESSED_BY_SHANK=True):
+# KS_OUTPUT_FOLDERS={"1_shank0": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank0\\sorter_output", "1_shank1": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank1\\sorter_output", "1_shank2": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank2\\sorter_output", "1_shank3": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank3\\sorter_output"}
 
 # Process monitoring interval in seconds
 CHECK_INTERVAL=15

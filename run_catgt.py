@@ -27,7 +27,7 @@ DEFAULT_PARAMS = {
     'DEST_DIR': None,    # Required
     'CATGT_PATH': None,  # Required
     'SESSION_NAME': None,  # Required
-    'PROBE_INDICES': [0],
+    'PROBE_INDICES': None,   # None = NIDQ-only; list of ints = also process those probe AP bands
     'CHECK_INTERVAL': 120,
     'ANALOG_CHANNELS': {
         'XA0': [1, 3],
@@ -40,7 +40,8 @@ DEFAULT_PARAMS = {
         'XA7': [1, 3]
     },
     'DIGITAL_CHANNELS': ['XD2', 'XD3'],
-    'NUM_ANALOG_CHANNELS': 8
+    'NUM_ANALOG_CHANNELS': 8,
+    'MANUAL_PARAMS': []
 }
 
 # Required parameters
@@ -67,8 +68,11 @@ def parse_params_file(params_file):
                 if key in params:
                     # Handle different parameter types
                     if key == 'PROBE_INDICES':
-                        # Parse list of integers
-                        params[key] = [int(x.strip()) for x in value.split(',')]
+                        stripped = value.strip()
+                        if not stripped or stripped.lower() == 'none':
+                            params[key] = None
+                        else:
+                            params[key] = [int(x.strip()) for x in stripped.split(',')]
                     elif key == 'CHECK_INTERVAL':
                         # Parse integer
                         params[key] = int(value)
@@ -82,6 +86,10 @@ def parse_params_file(params_file):
                     elif key == 'NUM_ANALOG_CHANNELS':
                         # Parse integer
                         params[key] = int(value)
+                    elif key == 'MANUAL_PARAMS':
+                        # Parse JSON list of strings, e.g. ["-no_auto_sync", "-no_tshift"]
+                        import json
+                        params[key] = json.loads(value)
                     else:
                         # String parameters
                         params[key] = value
@@ -135,14 +143,13 @@ def generate_catgt_command(params):
     is_windows = platform.system() == "Windows"
     catgt_exe = os.path.join(params['CATGT_PATH'], "CatGT.exe" if is_windows else "CatGT")
     
-    # Format probe indices into string for CatGT
-    if len(params['PROBE_INDICES']) == 1:
-        probe_param = str(params['PROBE_INDICES'][0])
-    else:
+    # Build probe flags only when probes are requested
+    probe_flags = ""
+    if params['PROBE_INDICES']:
         probe_param = ','.join(map(str, params['PROBE_INDICES']))
-    
-    # Base command prefix
-    command_prefix = f"{catgt_exe} -dir={params['SOURCE_DIR']} -run={params['SESSION_NAME']} -g=0 -t=0 -prb_fld -t_miss_ok -ni -ap -prb={probe_param}"
+        probe_flags = f" -ap -prb={probe_param}"
+
+    command_prefix = f"{catgt_exe} -dir={params['SOURCE_DIR']} -run={params['SESSION_NAME']} -g=0 -t=0 -prb_fld -t_miss_ok -ni{probe_flags}"
     
     # Generate analog channel parameters
     analog_params = ""
@@ -158,9 +165,14 @@ def generate_catgt_command(params):
     
     # Destination parameter
     command_suffix = f"-dest={params['DEST_DIR']}"
-    
+
+    # Manual extra flags
+    manual_params = ' '.join(params['MANUAL_PARAMS'])
+
     # Build the complete command
     command = f"{command_prefix} {analog_params}{digital_params} {command_suffix}"
+    if manual_params:
+        command = f"{command} {manual_params}"
     
     return command
 
@@ -298,7 +310,10 @@ def process_session(params_file):
     logger.info(f"Parameters file: {params_file}")
     logger.info(f"Source directory: {params['SOURCE_DIR']}")
     logger.info(f"Destination directory: {params['DEST_DIR']}")
-    logger.info(f"Processing probes: {params['PROBE_INDICES']}")
+    if params['PROBE_INDICES']:
+        logger.info(f"Processing probes: {params['PROBE_INDICES']}")
+    else:
+        logger.info("No probes specified - NIDQ-only run")
     
     # Make sure output directory exists
     os.makedirs(params['DEST_DIR'], exist_ok=True)

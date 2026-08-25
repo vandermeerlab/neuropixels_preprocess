@@ -15,11 +15,27 @@ SESSION_ID=M511-2024-11-14
 # List of probes to process (comma-separated)
 PROBE_INDICES=0,1
 
-# Sorter output folders (JSON format mapping probe indices to Kilosort/Phy output paths)
+# Set to True if data was sorted per-shank (e.g. Quadbase via extract_lfp_and_run_ks4_by_shank.py)
+# When True, SHANK_INDICES must also be set and SORTER_OUTPUT_FOLDERS/PREPROCESS_FOLDERS
+# must use "p_shank_s" keys (e.g. "0_shank0"). Units from all shanks are merged into one
+# per-probe output file (unit_type_units_imec{p}.mat) so downstream NWB loading is unchanged.
+# When False (default), legacy per-probe behavior applies and keys are just probe indices ("0", "1").
+PROCESSED_BY_SHANK=False
+
+# Required when PROCESSED_BY_SHANK=True: shanks to process (comma-separated)
+# SHANK_INDICES=0,1,2,3
+
+# Sorter output folders (JSON format)
+# Legacy per-probe keys:
 SORTER_OUTPUT_FOLDERS={"0": "F:\\KS4_outputs\\M511-2024-11-14_imec0\\sorter_output", "1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
+# Per-shank keys (use instead when PROCESSED_BY_SHANK=True):
+# SORTER_OUTPUT_FOLDERS={"0_shank0": "F:\\KS4_outputs\\SESSION_imec0_shank0\\sorter_output", "0_shank1": "F:\\KS4_outputs\\SESSION_imec0_shank1\\sorter_output", "0_shank2": "F:\\KS4_outputs\\SESSION_imec0_shank2\\sorter_output", "0_shank3": "F:\\KS4_outputs\\SESSION_imec0_shank3\\sorter_output"}
 
 # SI preprocess folders containing binary recordings (JSON format)
+# Legacy per-probe keys:
 PREPROCESS_FOLDERS={"0": "E:\\STNPilot\\Test\\preprocessed\\imec0_si_preprocess", "1": "E:\\STNPilot\\Test\\preprocessed\\imec1_si_preprocess"}
+# Per-shank keys (use instead when PROCESSED_BY_SHANK=True):
+# PREPROCESS_FOLDERS={"0_shank0": "F:\\KS4_outputs\\SESSION_imec0_shank0_si_preprocess", "0_shank1": "F:\\KS4_outputs\\SESSION_imec0_shank1_si_preprocess", "0_shank2": "F:\\KS4_outputs\\SESSION_imec0_shank2_si_preprocess", "0_shank3": "F:\\KS4_outputs\\SESSION_imec0_shank3_si_preprocess"}
 
 # Whether to extract and save unit waveforms
 SAVE_WAVEFORMS=true

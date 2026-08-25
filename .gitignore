@@ -2,3 +2,7 @@
 *.ipynb
 *.vscode
 *.asv
+*.claude
+__pycache__
+*TPrime.log
+*CatGT.log
