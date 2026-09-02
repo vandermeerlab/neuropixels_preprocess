@@ -15,27 +15,31 @@ SESSION_ID=M511-2024-11-14
 # List of probes to process (comma-separated)
 PROBE_INDICES=0,1
 
-# Set to True if data was sorted per-shank (e.g. Quadbase via extract_lfp_and_run_ks4_by_shank.py)
-# When True, SHANK_INDICES must also be set and SORTER_OUTPUT_FOLDERS/PREPROCESS_FOLDERS
-# must use "p_shank_s" keys (e.g. "0_shank0"). Units from all shanks are merged into one
-# per-probe output file (unit_type_units_imec{p}.mat) so downstream NWB loading is unchanged.
-# When False (default), legacy per-probe behavior applies and keys are just probe indices ("0", "1").
-PROCESSED_BY_SHANK=False
+# Probes that were sorted per-shank (comma-separated; must match PROCESS_BY_SHANK_FOR used in
+# extract_lfp_and_run_ks4.py). Probes listed here need "imec{p}_shank{s}" keys (e.g. "imec0_shank0")
+# in SORTER_OUTPUT_FOLDERS/PREPROCESS_FOLDERS; every other probe uses "imec{p}" (e.g. "imec1").
+# Units from all shanks are merged into one per-probe output file (unit_type_units_imec{p}.mat)
+# so downstream NWB loading is unchanged. Empty = no probe by shank.
+PROCESS_BY_SHANK_FOR=
 
-# Required when PROCESSED_BY_SHANK=True: shanks to process (comma-separated)
+# Shanks to process for each by-shank probe (comma-separated)
 # SHANK_INDICES=0,1,2,3
+# Optional per-probe override, when two by-shank probes have different shank sets:
+# SHANK_INDICES_IMEC0=0,1
 
 # Sorter output folders (JSON format)
-# Legacy per-probe keys:
-SORTER_OUTPUT_FOLDERS={"0": "F:\\KS4_outputs\\M511-2024-11-14_imec0\\sorter_output", "1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
-# Per-shank keys (use instead when PROCESSED_BY_SHANK=True):
-# SORTER_OUTPUT_FOLDERS={"0_shank0": "F:\\KS4_outputs\\SESSION_imec0_shank0\\sorter_output", "0_shank1": "F:\\KS4_outputs\\SESSION_imec0_shank1\\sorter_output", "0_shank2": "F:\\KS4_outputs\\SESSION_imec0_shank2\\sorter_output", "0_shank3": "F:\\KS4_outputs\\SESSION_imec0_shank3\\sorter_output"}
+# Per-probe keys (probes not in PROCESS_BY_SHANK_FOR):
+SORTER_OUTPUT_FOLDERS={"imec0": "F:\\KS4_outputs\\M511-2024-11-14_imec0\\sorter_output", "imec1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
+# Per-shank keys (probes in PROCESS_BY_SHANK_FOR):
+# SORTER_OUTPUT_FOLDERS={"imec0_shank0": "F:\\KS4_outputs\\SESSION_imec0_shank0\\sorter_output", "imec0_shank1": "F:\\KS4_outputs\\SESSION_imec0_shank1\\sorter_output", "imec0_shank2": "F:\\KS4_outputs\\SESSION_imec0_shank2\\sorter_output", "imec0_shank3": "F:\\KS4_outputs\\SESSION_imec0_shank3\\sorter_output"}
+# Both key styles may be mixed in one dict, e.g. PROCESS_BY_SHANK_FOR=0 with probes 0 and 1:
+# SORTER_OUTPUT_FOLDERS={"imec0_shank0": "...", "imec0_shank1": "...", "imec0_shank2": "...", "imec0_shank3": "...", "imec1": "..."}
 
-# SI preprocess folders containing binary recordings (JSON format)
-# Legacy per-probe keys:
-PREPROCESS_FOLDERS={"0": "E:\\STNPilot\\Test\\preprocessed\\imec0_si_preprocess", "1": "E:\\STNPilot\\Test\\preprocessed\\imec1_si_preprocess"}
-# Per-shank keys (use instead when PROCESSED_BY_SHANK=True):
-# PREPROCESS_FOLDERS={"0_shank0": "F:\\KS4_outputs\\SESSION_imec0_shank0_si_preprocess", "0_shank1": "F:\\KS4_outputs\\SESSION_imec0_shank1_si_preprocess", "0_shank2": "F:\\KS4_outputs\\SESSION_imec0_shank2_si_preprocess", "0_shank3": "F:\\KS4_outputs\\SESSION_imec0_shank3_si_preprocess"}
+# SI preprocess folders containing binary recordings (JSON format, same key style as above)
+# Per-probe keys:
+PREPROCESS_FOLDERS={"imec0": "E:\\STNPilot\\Test\\preprocessed\\imec0_si_preprocess", "imec1": "E:\\STNPilot\\Test\\preprocessed\\imec1_si_preprocess"}
+# Per-shank keys:
+# PREPROCESS_FOLDERS={"imec0_shank0": "F:\\KS4_outputs\\SESSION_imec0_shank0_si_preprocess", "imec0_shank1": "F:\\KS4_outputs\\SESSION_imec0_shank1_si_preprocess", "imec0_shank2": "F:\\KS4_outputs\\SESSION_imec0_shank2_si_preprocess", "imec0_shank3": "F:\\KS4_outputs\\SESSION_imec0_shank3_si_preprocess"}
 
 # Whether to extract and save unit waveforms
 SAVE_WAVEFORMS=true

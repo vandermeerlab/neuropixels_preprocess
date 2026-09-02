@@ -12,6 +12,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -27,9 +28,10 @@ DEFAULT_PARAMS = {
     'OUTPUT_DIR': None,        # Required - path to save extracted unit files
     'SESSION_ID': None,        # Required - session identifier
     'PROBE_INDICES': [0],      # List of probe indices to process
-    'PROCESSED_BY_SHANK': False, # If True, expect per-shank KS folders and merge into one per-probe .mat
-    'SHANK_INDICES': None,       # Required when PROCESSED_BY_SHANK=True (e.g. 0,1,2,3)
-    'SORTER_OUTPUT_FOLDERS': {}, # Per-probe: {"0": "path"} or per-shank: {"0_shank0": "path", "0_shank1": "path", ...}
+    'PROCESS_BY_SHANK_FOR': [],  # Probe indices with per-shank KS folders, merged into one per-probe .mat
+    'SHANK_INDICES': None,       # Default shank list for every by-shank probe (e.g. 0,1,2,3)
+    'SHANK_INDICES_BY_PROBE': {},# Per-probe overrides; see SHANK_INDICES_IMEC{p} params
+    'SORTER_OUTPUT_FOLDERS': {}, # Per-probe: {"imec0": "path"} or per-shank: {"imec0_shank0": "path", ...}
     'PREPROCESS_FOLDERS': {},  # Same key format as SORTER_OUTPUT_FOLDERS
     'SAVE_WAVEFORMS': True,    # Whether to extract and save unit waveforms
     'EXTRACT_GOOD_UNITS': True, # Whether to extract good units
@@ -39,6 +41,22 @@ DEFAULT_PARAMS = {
 
 # Required parameters
 REQUIRED_PARAMS = ['CATGT_OUTPUT_DIR', 'OUTPUT_DIR', 'SESSION_ID']
+
+def shanks_for_probe(params, probe_idx):
+    """Shank indices for one probe: per-probe override if given, else the global default."""
+    return params['SHANK_INDICES_BY_PROBE'].get(probe_idx, params['SHANK_INDICES']) or []
+
+
+def check_folder_dict_keys(folder_dict, param_name):
+    """Reject the old bare-index key style ("0", "0_shank1") with a rename hint."""
+    old_style = sorted(k for k in folder_dict if re.match(r'^\d+(_shank\d+)?$', str(k)))
+    if old_style:
+        renamed = ', '.join(f"'{k}' -> 'imec{k}'" for k in old_style)
+        raise ValueError(
+            f"{param_name} uses the old bare-index key style; prefix probe keys with "
+            f"'imec': {renamed}"
+        )
+
 
 def parse_params_file(params_file):
     """Parse parameters from a file"""
@@ -66,7 +84,12 @@ def parse_params_file(params_file):
                             params[key] = None
                         else:
                             params[key] = [int(x.strip()) for x in value.split(',')]
-                    elif key in ['SAVE_WAVEFORMS', 'EXTRACT_GOOD_UNITS', 'EXTRACT_MUA_UNITS', 'PROCESSED_BY_SHANK']:
+                    elif key == 'PROCESS_BY_SHANK_FOR':
+                        if value.lower() == 'none' or not value.strip():
+                            params[key] = []
+                        else:
+                            params[key] = [int(x.strip()) for x in value.split(',')]
+                    elif key in ['SAVE_WAVEFORMS', 'EXTRACT_GOOD_UNITS', 'EXTRACT_MUA_UNITS']:
                         # Parse boolean
                         params[key] = value.lower() == 'true'
                     elif key == 'NUM_JOBS':
@@ -79,7 +102,14 @@ def parse_params_file(params_file):
                         # String parameters
                         params[key] = value
                 else:
-                    print(f"Warning: Unknown parameter '{key}' in params file")
+                    # Per-probe shank list overrides, e.g. SHANK_INDICES_IMEC0 = 0,1,2,3
+                    match = re.match(r'^SHANK_INDICES_IMEC(\d+)$', key)
+                    if match:
+                        params['SHANK_INDICES_BY_PROBE'][int(match.group(1))] = [
+                            int(x.strip()) for x in value.split(',')
+                        ]
+                    else:
+                        print(f"Warning: Unknown parameter '{key}' in params file")
             except Exception as e:
                 print(f"Error parsing line '{line}': {e}")
         
@@ -87,6 +117,9 @@ def parse_params_file(params_file):
         missing_params = [param for param in REQUIRED_PARAMS if params[param] is None]
         if missing_params:
             raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
+
+        check_folder_dict_keys(params['SORTER_OUTPUT_FOLDERS'], 'SORTER_OUTPUT_FOLDERS')
+        check_folder_dict_keys(params['PREPROCESS_FOLDERS'], 'PREPROCESS_FOLDERS')
         
         return params
         
@@ -150,15 +183,15 @@ def load_recordings_and_sorting(params, probe_idx, logger, shank_idx=None, shank
     """
     Load recordings and sorting data for a probe (or one shank of a probe).
 
-    When shank_idx is given, folder dict keys are expected in "p_shank_s" format
-    (e.g. "0_shank0") and shank_rec is the already-split sub-recording from
+    When shank_idx is given, folder dict keys are expected as "imec{p}_shank{s}"
+    (e.g. "imec0_shank0") and shank_rec is the already-split sub-recording from
     split_by("group"). Bad channels are loaded from the per-shank JSON.
 
     Returns:
         tuple: (raw_rec, rec, sorting), all None on failure.
     """
     try:
-        folder_key = f"{probe_idx}_shank{shank_idx}" if shank_idx is not None else str(probe_idx)
+        folder_key = f"imec{probe_idx}_shank{shank_idx}" if shank_idx is not None else f"imec{probe_idx}"
         tag        = f"probe {probe_idx} shank {shank_idx}" if shank_idx is not None else f"probe {probe_idx}"
 
         if folder_key not in params['SORTER_OUTPUT_FOLDERS']:
@@ -399,10 +432,14 @@ def process_probe(probe_idx, params, logger):
     logger.info(f"Processing probe {probe_idx}...")
 
     try:
-        if params['PROCESSED_BY_SHANK']:
+        if probe_idx in params['PROCESS_BY_SHANK_FOR']:
             # ── Per-shank mode: load each shank's sorting, merge into one per-probe output ──
-            if not params['SHANK_INDICES']:
-                logger.error("PROCESSED_BY_SHANK=True but SHANK_INDICES is not set in params file")
+            shank_indices = shanks_for_probe(params, probe_idx)
+            if not shank_indices:
+                logger.error(
+                    f"Probe {probe_idx} is in PROCESS_BY_SHANK_FOR but no shanks are set; "
+                    f"set SHANK_INDICES or SHANK_INDICES_IMEC{probe_idx} in the params file"
+                )
                 return False
             logger.info(f"Per-shank mode: loading probe {probe_idx} recording for splitting...")
             full_rec   = si.read_spikeglx(params['CATGT_OUTPUT_DIR'], stream_name=f"imec{probe_idx}.ap")
@@ -411,7 +448,7 @@ def process_probe(probe_idx, params, logger):
             good_shank_dicts = []
             mua_shank_dicts  = []
 
-            for shank_idx in params['SHANK_INDICES']:
+            for shank_idx in shank_indices:
                 if shank_idx not in shank_recs:
                     logger.warning(f"Shank {shank_idx} not found in recording groups, skipping")
                     continue
@@ -495,7 +532,8 @@ def process_session(params_file):
     logger.info(f"CatGT output directory: {params['CATGT_OUTPUT_DIR']}")
     logger.info(f"Output directory: {params['OUTPUT_DIR']}")
     logger.info(f"Processing probes: {params['PROBE_INDICES']}")
-    
+    logger.info(f"Probes sorted by shank: {params['PROCESS_BY_SHANK_FOR']}")
+
     # Make sure output directory exists
     os.makedirs(params['OUTPUT_DIR'], exist_ok=True)
     

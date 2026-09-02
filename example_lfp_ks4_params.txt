@@ -16,9 +16,24 @@ RUN_KILOSORT_FOR = 0,1
 
 # Optional processing selections
 
+# Probe indices (from PROBE_INDICES) to split by shank (e.g. Quadbase: 4 shanks x 384 ch/shank);
+# any probe not listed here is processed whole (e.g. a standard NPX2 probe). Empty = no probe by shank.
+# Mixed example below: probe 0 is a quadprobe processed by shank, probe 1 is a standard whole probe.
+PROCESS_BY_SHANK_FOR = 0
+
 # Bad channel options
 OVERRIDE_BAD_CHANNELS = False
+# Option A: one combined file with nested keys, e.g. {"imec0_shank0": {"bad_channel_ids": [...]}, ...}
 # MANUAL_BAD_CHANNELS_FILE = path/to/manual_bad_channels.json
+# Option B: per-probe/shank files (e.g. the ones written by this script into CATGT_OUTPUT_DIR),
+# each containing a flat {"bad_channel_ids": [...]}. Add one line per whole probe (not in
+# PROCESS_BY_SHANK_FOR) or per probe+shank (probe in PROCESS_BY_SHANK_FOR); uncomment the ones
+# matching your probes/shanks. Matching the mixed example above (probe 0 by shank, probe 1 whole):
+# MANUAL_BAD_CHANNELS_FILE_IMEC0_SHANK0 = path/to/imec0_shank0_bad_channels.json
+# MANUAL_BAD_CHANNELS_FILE_IMEC0_SHANK1 = path/to/imec0_shank1_bad_channels.json
+# MANUAL_BAD_CHANNELS_FILE_IMEC0_SHANK2 = path/to/imec0_shank2_bad_channels.json
+# MANUAL_BAD_CHANNELS_FILE_IMEC0_SHANK3 = path/to/imec0_shank3_bad_channels.json
+# MANUAL_BAD_CHANNELS_FILE_IMEC1 = path/to/imec1_bad_channels.json
 MAX_BAD_CHANNELS = 25
 
 # LFP channel selection options
@@ -39,6 +54,8 @@ AP_HIGH_PASS = 400.0
 KS_PARAMS = {"delete_recording_dat": true, "use_binary_file": true}
 
 # Processing parameters
-LFP_NUM_JOBS = -1
+# -1 is maximum number of cores, but it gives problems especially for LFP. Try to use less than whatever number of cores are available
+LFP_NUM_JOBS = 8
 SI_NUM_JOBS = -1
 CHUNK_DURATION = 1s
+LFP_CHUNK_DURATION = 30s

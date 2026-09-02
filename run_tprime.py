@@ -14,6 +14,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -41,14 +42,31 @@ DEFAULT_PARAMS = {
     'DIGITAL_CHANNELS': ['XD2', 'XD3'],
     'RAW_ANALOG_CHANNELS': [], # Channels whose _raw_times.npy files should be aligned
     'KS_OUTPUT_FOLDERS': {},   # Dict mapping probe/shank keys to Kilosort output folders
-    'PROCESSED_BY_SHANK': False,  # True if KS was run per-shank (Quadbase)
-    'SHANK_INDICES': None,        # List of shank indices when PROCESSED_BY_SHANK=True
+    'PROCESS_BY_SHANK_FOR': [],   # Probe indices whose KS was run per-shank (e.g. Quadbase)
+    'SHANK_INDICES': None,        # Default shank list for every by-shank probe
+    'SHANK_INDICES_BY_PROBE': {}, # Per-probe overrides; see SHANK_INDICES_IMEC{p} params
     'CHECK_INTERVAL': 15,      # Time in seconds between checks for TPrime process
     'TIMEOUT': 300             # Maximum time to wait for TPrime to complete (seconds)
 }
 
 # Required parameters
 REQUIRED_PARAMS = ['CATGT_OUTPUT_DIR', 'OUTPUT_DIR', 'SESSION_ID', 'TPRIME_PATH']
+
+def shanks_for_probe(params, probe_idx):
+    """Shank indices for one probe: per-probe override if given, else the global default."""
+    return params['SHANK_INDICES_BY_PROBE'].get(probe_idx, params['SHANK_INDICES']) or []
+
+
+def check_folder_dict_keys(folder_dict, param_name):
+    """Reject the old bare-index key style ("0", "0_shank1") with a rename hint."""
+    old_style = sorted(k for k in folder_dict if re.match(r'^\d+(_shank\d+)?$', str(k)))
+    if old_style:
+        renamed = ', '.join(f"'{k}' -> 'imec{k}'" for k in old_style)
+        raise ValueError(
+            f"{param_name} uses the old bare-index key style; prefix probe keys with "
+            f"'imec': {renamed}"
+        )
+
 
 def parse_params_file(params_file):
     """Parse parameters from a file"""
@@ -90,8 +108,11 @@ def parse_params_file(params_file):
                             params[key] = [x.strip() for x in value.split(',')]
                     elif key == 'KS_OUTPUT_FOLDERS':
                         params[key] = json.loads(value)
-                    elif key == 'PROCESSED_BY_SHANK':
-                        params[key] = value.lower() == 'true'
+                    elif key == 'PROCESS_BY_SHANK_FOR':
+                        if value.lower() == 'none' or not value.strip():
+                            params[key] = []
+                        else:
+                            params[key] = [int(x.strip()) for x in value.split(',')]
                     elif key == 'SHANK_INDICES':
                         if value.lower() == 'none':
                             params[key] = None
@@ -101,7 +122,14 @@ def parse_params_file(params_file):
                         # String parameters
                         params[key] = value
                 else:
-                    print(f"Warning: Unknown parameter '{key}' in params file")
+                    # Per-probe shank list overrides, e.g. SHANK_INDICES_IMEC0 = 0,1,2,3
+                    match = re.match(r'^SHANK_INDICES_IMEC(\d+)$', key)
+                    if match:
+                        params['SHANK_INDICES_BY_PROBE'][int(match.group(1))] = [
+                            int(x.strip()) for x in value.split(',')
+                        ]
+                    else:
+                        print(f"Warning: Unknown parameter '{key}' in params file")
             except Exception as e:
                 print(f"Error parsing line '{line}': {e}")
         
@@ -113,21 +141,28 @@ def parse_params_file(params_file):
         # Check if TO_PROBE is in PROBE_INDICES
         if params['TO_PROBE'] not in params['PROBE_INDICES']:
             raise ValueError(f"TO_PROBE ({params['TO_PROBE']}) must be in PROBE_INDICES ({params['PROBE_INDICES']})")
-        
-        # If aligning spikes, check that KS_OUTPUT_FOLDERS is provided for all from_probes/shanks
+
+        check_folder_dict_keys(params['KS_OUTPUT_FOLDERS'], 'KS_OUTPUT_FOLDERS')
+
+        # If aligning spikes, check that KS_OUTPUT_FOLDERS is provided for all from_probes/shanks.
+        # Each probe is checked against its own mode, so by-shank and whole probes can be mixed.
         if params['ALIGN_SPIKES']:
             from_probes = [p for p in params['PROBE_INDICES'] if p != params['TO_PROBE']]
-            if params['PROCESSED_BY_SHANK']:
-                if not params['SHANK_INDICES']:
-                    raise ValueError("PROCESSED_BY_SHANK=True but SHANK_INDICES is not set")
-                missing_folders = [
-                    f"{p}_shank{s}"
-                    for p in from_probes
-                    for s in params['SHANK_INDICES']
-                    if f"{p}_shank{s}" not in params['KS_OUTPUT_FOLDERS']
-                ]
-            else:
-                missing_folders = [str(p) for p in from_probes if str(p) not in params['KS_OUTPUT_FOLDERS']]
+            missing_folders = []
+            for p in from_probes:
+                if p in params['PROCESS_BY_SHANK_FOR']:
+                    shanks = shanks_for_probe(params, p)
+                    if not shanks:
+                        raise ValueError(
+                            f"Probe {p} is in PROCESS_BY_SHANK_FOR but no shanks are set; "
+                            f"set SHANK_INDICES or SHANK_INDICES_IMEC{p}"
+                        )
+                    missing_folders += [
+                        f"imec{p}_shank{s}" for s in shanks
+                        if f"imec{p}_shank{s}" not in params['KS_OUTPUT_FOLDERS']
+                    ]
+                elif f"imec{p}" not in params['KS_OUTPUT_FOLDERS']:
+                    missing_folders.append(f"imec{p}")
             if missing_folders:
                 raise ValueError(f"KS_OUTPUT_FOLDERS missing entries: {missing_folders}")
         
@@ -386,14 +421,14 @@ def generate_align_spikes_command(params, to_file, from_file, from_probe, logger
     """
     Generate a TPrime command to align spike times from Kilosort output.
 
-    folder_key: key into KS_OUTPUT_FOLDERS (e.g. "0" for legacy, "0_shank2" for shank mode).
-                Defaults to str(from_probe) when not provided.
+    folder_key: key into KS_OUTPUT_FOLDERS (e.g. "imec0" for a whole probe,
+                "imec0_shank2" for shank mode). Defaults to "imec{from_probe}".
     """
     is_windows = platform.system() == "Windows"
     tprime_exe = os.path.join(params['TPRIME_PATH'], "TPrime.exe" if is_windows else "runit.sh")
 
     if folder_key is None:
-        folder_key = str(from_probe)
+        folder_key = f"imec{from_probe}"
 
     try:
         sorter_output_folder = params['KS_OUTPUT_FOLDERS'][folder_key]
@@ -441,43 +476,26 @@ def generate_align_spikes_command(params, to_file, from_file, from_probe, logger
     
     return command, sorter_output_folder, output_files
 
-def generate_align_lfp_command(params, to_file, from_file, from_probe, logger, shank_indices=None):
+def generate_align_lfp_command(params, to_file, from_file, from_probe, logger):
     """
     Generate a TPrime command to align LFP times.
 
-    shank_indices: None  -> legacy mode, one file per probe (imec{p}_lfp_times.npy)
-                   list  -> shank mode, one file per shank batched into a single call
-                            (imec{p}_shank{s}_lfp_times.npy for each s in shank_indices)
+    Always one file per probe (imec{p}_lfp_times.npy), including for probes sorted
+    per-shank: a probe's shanks are clock-locked, so they share a single time vector.
     """
     is_windows = platform.system() == "Windows"
     tprime_exe = os.path.join(params['TPRIME_PATH'], "TPrime.exe" if is_windows else "runit.sh")
 
     command_base = f"{tprime_exe} -syncperiod=1.0 -tostream={to_file} -fromstream=5,{from_file}"
-    output_files = []
-    events_params = ""
 
-    if shank_indices is None:
-        lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_lfp_times.npy")
-        adj_lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_adj_lfp_times.npy")
-        if not os.path.isfile(lfp_times_path):
-            logger.error(f"LFP times file not found: {lfp_times_path}")
-            return None, None
-        events_params += f" -events=5,{lfp_times_path},{adj_lfp_times_path}"
-        output_files.append(adj_lfp_times_path)
-    else:
-        for s in shank_indices:
-            lfp_times_path = os.path.join(
-                params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_shank{s}_lfp_times.npy")
-            adj_lfp_times_path = os.path.join(
-                params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_shank{s}_adj_lfp_times.npy")
-            if not os.path.isfile(lfp_times_path):
-                logger.warning(f"LFP times file not found for shank {s}: {lfp_times_path} - skipping")
-                continue
-            events_params += f" -events=5,{lfp_times_path},{adj_lfp_times_path}"
-            output_files.append(adj_lfp_times_path)
-        if not output_files:
-            logger.error(f"No shank LFP time files found for probe {from_probe}")
-            return None, None
+    lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_lfp_times.npy")
+    adj_lfp_times_path = os.path.join(params['CATGT_OUTPUT_DIR'], f"imec{from_probe}_adj_lfp_times.npy")
+    if not os.path.isfile(lfp_times_path):
+        logger.error(f"LFP times file not found: {lfp_times_path}")
+        return None, None
+
+    events_params = f" -events=5,{lfp_times_path},{adj_lfp_times_path}"
+    output_files = [adj_lfp_times_path]
 
     return f"{command_base}{events_params}", output_files
 
@@ -815,15 +833,15 @@ def align_probe(to_probe, from_probe, params, logger):
         return False
 
     all_successful = True
-    by_shank = params['PROCESSED_BY_SHANK']
-    shank_indices = params['SHANK_INDICES'] if by_shank else None
+    by_shank = from_probe in params['PROCESS_BY_SHANK_FOR']
+    shank_indices = shanks_for_probe(params, from_probe) if by_shank else None
 
     # Align spike times
     if params['ALIGN_SPIKES']:
         shank_list = shank_indices if by_shank else [None]
         for s in shank_list:
             label = f"probe {from_probe}" + (f" shank {s}" if s is not None else "")
-            folder_key = f"{from_probe}_shank{s}" if s is not None else None
+            folder_key = f"imec{from_probe}_shank{s}" if s is not None else None
             logger.info(f"Aligning spike times for {label}...")
             spikes_command, sorter_output_folder, output_files = generate_align_spikes_command(
                 params, to_file, from_file, from_probe, logger, folder_key=folder_key)
@@ -844,13 +862,11 @@ def align_probe(to_probe, from_probe, params, logger):
                     logger.error(f"Spike times adjustment cleanup failed for {label}")
                     all_successful = False
 
-    # Align LFP times (shank mode: all shanks batched into one TPrime call)
+    # Align LFP times (one time vector per probe, shanks included)
     if params['ALIGN_LFP']:
-        logger.info(f"Aligning LFP times for probe {from_probe}" +
-                    (f" (shanks {shank_indices})" if by_shank else "") + "...")
+        logger.info(f"Aligning LFP times for probe {from_probe}...")
         lfp_command, output_files = generate_align_lfp_command(
-            params, to_file, from_file, from_probe, logger,
-            shank_indices=shank_indices)
+            params, to_file, from_file, from_probe, logger)
         if lfp_command is None:
             logger.error(f"Failed to generate LFP times alignment command for probe {from_probe}")
             all_successful = False
@@ -879,6 +895,7 @@ def process_session(params_file):
     logger.info(f"Reference probe (to_probe): {params['TO_PROBE']}")
     from_probes = [p for p in params['PROBE_INDICES'] if p != params['TO_PROBE']]
     logger.info(f"Probes to align: {from_probes}")
+    logger.info(f"Probes sorted by shank: {params['PROCESS_BY_SHANK_FOR']}")
 
     os.makedirs(params['OUTPUT_DIR'], exist_ok=True)
 

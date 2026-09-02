@@ -18,7 +18,10 @@ TPRIME_PATH=D:\TPrime-win
 # List of all probes in the recording (comma-separated)
 PROBE_INDICES=0,1
 
-# Reference probe against which other probes will be aligned
+# Reference probe against which other probes will be aligned.
+# IMPORTANT: if the recording contains one or more quadprobes, ALWAYS set TO_PROBE to a
+# quadprobe. A probe is trivially aligned to itself, so making the quadprobe the reference
+# avoids per-shank spike alignment entirely unless a second quadprobe is present.
 TO_PROBE=0
 
 # Data alignment options (set to true or false)
@@ -38,18 +41,27 @@ DIGITAL_CHANNELS=XD2,XD3
 # Only used when ALIGN_RAW_ANALOG=True
 RAW_ANALOG_CHANNELS=XA0,XA7
 
-# Set to True if data was sorted per-shank (e.g. Quadbase via extract_lfp_and_run_ks4_by_shank.py)
-# When True, SHANK_INDICES must also be set and KS_OUTPUT_FOLDERS must use "{probe}_shank{shank}" keys.
-PROCESSED_BY_SHANK=False
+# Probes that were sorted per-shank (comma-separated; must match PROCESS_BY_SHANK_FOR used in
+# extract_lfp_and_run_ks4.py). Probes listed here need "imec{p}_shank{s}" keys in
+# KS_OUTPUT_FOLDERS; every other probe uses "imec{p}". Empty = no probe by shank.
+# Only matters for probes actually being aligned, i.e. not TO_PROBE.
+PROCESS_BY_SHANK_FOR=
 
-# Required when PROCESSED_BY_SHANK=True: shanks to process (comma-separated)
+# Shanks to align for each by-shank probe (comma-separated)
 # SHANK_INDICES=0,1,2,3
+# Optional per-probe override, when two by-shank probes have different shank sets:
+# SHANK_INDICES_IMEC1=0,1
 
 # Kilosort output folders (JSON format)
-# Legacy per-probe keys (use when PROCESSED_BY_SHANK=False):
-KS_OUTPUT_FOLDERS={"1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
-# Per-shank keys (use instead when PROCESSED_BY_SHANK=True):
-# KS_OUTPUT_FOLDERS={"1_shank0": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank0\\sorter_output", "1_shank1": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank1\\sorter_output", "1_shank2": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank2\\sorter_output", "1_shank3": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank3\\sorter_output"}
+# Per-probe keys (probes not in PROCESS_BY_SHANK_FOR):
+KS_OUTPUT_FOLDERS={"imec1": "F:\\KS4_outputs\\M511-2024-11-14_imec1\\sorter_output"}
+# Per-shank keys (probes in PROCESS_BY_SHANK_FOR):
+# KS_OUTPUT_FOLDERS={"imec1_shank0": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank0\\sorter_output", "imec1_shank1": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank1\\sorter_output", "imec1_shank2": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank2\\sorter_output", "imec1_shank3": "F:\\KS4_outputs\\M511-2024-11-14_imec1_shank3\\sorter_output"}
+# Both key styles may be mixed in one dict, e.g. PROCESS_BY_SHANK_FOR=1 with probes 1 and 2:
+# KS_OUTPUT_FOLDERS={"imec1_shank0": "...", "imec1_shank1": "...", "imec1_shank2": "...", "imec1_shank3": "...", "imec2": "..."}
+
+# Note: LFP times are always one file per probe (imec{p}_lfp_times.npy), including for
+# by-shank probes -- a probe's shanks are clock-locked and share a single time vector.
 
 # Process monitoring interval in seconds
 CHECK_INTERVAL=15

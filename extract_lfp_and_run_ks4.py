@@ -3,7 +3,7 @@
 Neuropixels LFP Extraction and Kilosort4 Processing
 
 Supports both per-probe (standard NPX2) and per-shank (e.g. Quadbase: 4 shanks x 384 ch)
-processing, controlled by the PROCESS_BY_SHANK parameter.
+processing, controlled per-probe by the PROCESS_BY_SHANK_FOR parameter.
 
 Usage:
     python extract_lfp_and_run_ks4.py --file_params path/to/params.txt
@@ -11,6 +11,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -30,9 +31,10 @@ DEFAULT_PARAMS = {
     'PROBE_INDICES': [0],
     'EXTRACT_LFP_FOR': None,
     'RUN_KILOSORT_FOR': None,
-    'PROCESS_BY_SHANK': False,  # True = split by shank (e.g. Quadbase); False = whole probe
+    'PROCESS_BY_SHANK_FOR': [],  # probe indices to split by shank (e.g. Quadbase); other probes processed whole
     'OVERRIDE_BAD_CHANNELS': False,
-    'MANUAL_BAD_CHANNELS_FILE': None,
+    'MANUAL_BAD_CHANNELS_FILE': None,   # single combined file (nested imecN / imecN_shankN keys)
+    'MANUAL_BAD_CHANNELS_FILES': {},    # per-probe/shank overrides, keyed by e.g. 'imec0_shank0'; see MANUAL_BAD_CHANNELS_FILE_IMEC*_SHANK* params
     'MAX_BAD_CHANNELS': 25,     # per shank/probe; set ~100 for Quadbase (384 ch/shank)
     'OVERRIDE_LFP_CHANNELS': False,
     'MANUAL_LFP_CHANNELS_FILE': None,
@@ -48,7 +50,8 @@ DEFAULT_PARAMS = {
     },
     'LFP_NUM_JOBS': 8,
     'SI_NUM_JOBS': 10,
-    'CHUNK_DURATION': '1s'
+    'CHUNK_DURATION': '1s',
+    'LFP_CHUNK_DURATION': '30s',
 }
 
 REQUIRED_PARAMS = ['CATGT_OUTPUT_DIR', 'OUTPUT_DIR', 'SESSION_ID', 'FAST_STORAGE_DIR']
@@ -72,14 +75,14 @@ def parse_params_file(params_file):
                 value = value.strip()
 
                 if key in params:
-                    if key in ['PROBE_INDICES', 'EXTRACT_LFP_FOR', 'RUN_KILOSORT_FOR']:
+                    if key in ['PROBE_INDICES', 'EXTRACT_LFP_FOR', 'RUN_KILOSORT_FOR', 'PROCESS_BY_SHANK_FOR']:
                         if value.lower() == 'none':
                             params[key] = None
                         elif not value.strip():
                             params[key] = []
                         else:
                             params[key] = [int(x.strip()) for x in value.split(',')]
-                    elif key in ['OVERRIDE_BAD_CHANNELS', 'OVERRIDE_LFP_CHANNELS', 'PROCESS_BY_SHANK']:
+                    elif key in ['OVERRIDE_BAD_CHANNELS', 'OVERRIDE_LFP_CHANNELS']:
                         params[key] = value.lower() == 'true'
                     elif key in ['MAX_BAD_CHANNELS', 'LFP_SAMPLE_RATE', 'LFP_HIGH_PASS',
                                  'LFP_LOW_PASS', 'LFP_SPACING', 'INTER_SHANK_SPACE',
@@ -93,7 +96,16 @@ def parse_params_file(params_file):
                     else:
                         params[key] = value
                 else:
-                    print(f"Warning: Unknown parameter '{key}' in params file")
+                    # Per-probe/shank manual bad channel file overrides, e.g.:
+                    #   MANUAL_BAD_CHANNELS_FILE_IMEC0_SHANK0 = path/to/imec0_shank0_bad_channels.json
+                    #   MANUAL_BAD_CHANNELS_FILE_IMEC0 = path/to/imec0_bad_channels.json
+                    match = re.match(r'^MANUAL_BAD_CHANNELS_FILE_IMEC(\d+)(?:_SHANK(\d+))?$', key)
+                    if match:
+                        probe_num, shank_num = match.groups()
+                        override_key = f"imec{probe_num}" if shank_num is None else f"imec{probe_num}_shank{shank_num}"
+                        params['MANUAL_BAD_CHANNELS_FILES'][override_key] = value
+                    else:
+                        print(f"Warning: Unknown parameter '{key}' in params file")
 
             except Exception as e:
                 print(f"Error parsing line '{line}': {e}")
@@ -106,6 +118,14 @@ def parse_params_file(params_file):
             params['EXTRACT_LFP_FOR'] = params['PROBE_INDICES']
         if params['RUN_KILOSORT_FOR'] is None:
             params['RUN_KILOSORT_FOR'] = params['PROBE_INDICES']
+        if params['PROCESS_BY_SHANK_FOR'] is None:
+            params['PROCESS_BY_SHANK_FOR'] = []
+
+        if params['OVERRIDE_BAD_CHANNELS'] and not params['MANUAL_BAD_CHANNELS_FILE'] and not params['MANUAL_BAD_CHANNELS_FILES']:
+            raise ValueError(
+                "OVERRIDE_BAD_CHANNELS is True but no manual bad channels file is configured. "
+                "Set MANUAL_BAD_CHANNELS_FILE or per-probe/shank MANUAL_BAD_CHANNELS_FILE_IMEC*_SHANK* parameters."
+            )
 
         return params
 
@@ -134,26 +154,51 @@ def setup_logging(output_dir, session_id):
     return logging.getLogger(__name__)
 
 
-def _load_manual_bad_channels(manual_file, probe_idx, logger, shank_idx=None):
+def _load_manual_bad_channels(params, probe_idx, logger, shank_idx=None):
+    tag = f"probe {probe_idx}" + (f" shank {shank_idx}" if shank_idx is not None else "")
+    override_key = f"imec{probe_idx}_shank{shank_idx}" if shank_idx is not None else f"imec{probe_idx}"
+
+    dedicated_file = params['MANUAL_BAD_CHANNELS_FILES'].get(override_key)
+    manual_file = dedicated_file or params['MANUAL_BAD_CHANNELS_FILE']
+
+    if not manual_file:
+        logger.error(
+            f"No manual bad channels file configured for {tag}. "
+            f"Set MANUAL_BAD_CHANNELS_FILE or MANUAL_BAD_CHANNELS_FILE_{override_key.upper()}."
+        )
+        return None
+
+    logger.info(f"Using manual bad channels for {tag} from: {manual_file}")
+
     try:
         with open(manual_file, 'r') as f:
             manual_data = json.load(f)
 
-        shank_key = f"imec{probe_idx}_shank{shank_idx}" if shank_idx is not None else None
-        if shank_key and shank_key in manual_data:
-            return manual_data[shank_key]['bad_channel_ids']
-        elif f'imec{probe_idx}' in manual_data:
-            return manual_data[f'imec{probe_idx}']['bad_channel_ids']
-        elif f'probe{probe_idx}' in manual_data:
-            return manual_data[f'probe{probe_idx}']['bad_channel_ids']
-        elif 'bad_channel_ids' in manual_data:
-            return manual_data['bad_channel_ids']
+        if dedicated_file:
+            # File dedicated to this probe/shank (e.g. produced by save_bad_channels): flat 'bad_channel_ids'
+            if 'bad_channel_ids' in manual_data:
+                return manual_data['bad_channel_ids']
+            elif override_key in manual_data:
+                return manual_data[override_key]['bad_channel_ids']
+            else:
+                logger.error(f"Could not find 'bad_channel_ids' in {manual_file} for {tag}")
+                return None
         else:
-            tag = f"probe {probe_idx}" + (f" shank {shank_idx}" if shank_idx is not None else "")
-            logger.error(f"Could not find bad channel data for {tag} in manual file")
-            return None
+            # Combined file covering multiple probes/shanks under nested keys
+            shank_key = f"imec{probe_idx}_shank{shank_idx}" if shank_idx is not None else None
+            if shank_key and shank_key in manual_data:
+                return manual_data[shank_key]['bad_channel_ids']
+            elif f'imec{probe_idx}' in manual_data:
+                return manual_data[f'imec{probe_idx}']['bad_channel_ids']
+            elif f'probe{probe_idx}' in manual_data:
+                return manual_data[f'probe{probe_idx}']['bad_channel_ids']
+            elif 'bad_channel_ids' in manual_data:
+                return manual_data['bad_channel_ids']
+            else:
+                logger.error(f"Could not find bad channel data for {tag} in manual file")
+                return None
     except Exception as e:
-        logger.error(f"Error loading manual bad channels: {e}")
+        logger.error(f"Error loading manual bad channels for {tag} from {manual_file}: {e}")
         return None
 
 
@@ -207,6 +252,23 @@ def save_bad_channels(bad_channel_ids, catgt_output_dir, probe_idx, logger, shan
         return False
 
 
+def save_lfp_times(final_tvec, probe_idx, catgt_output_dir, logger):
+    """
+    Save the LFP time vector for a probe.
+
+    One file per probe, even when processing by shank: a probe's shanks are clocked
+    together, so every shank yields the same time vector.
+    """
+    try:
+        output_file = os.path.join(catgt_output_dir, f"imec{probe_idx}_lfp_times.npy")
+        np.save(output_file, final_tvec)
+        logger.info(f"Saved LFP times (.npy) to {output_file}")
+        return True
+    except Exception as e:
+        logger.error(f"Exception saving LFP times for probe {probe_idx}: {e}")
+        return False
+
+
 def extract_lfp(rec, bad_channel_ids, probe_idx, logger, params, shank_idx=None):
     tag = f"probe {probe_idx}" + (f" shank {shank_idx}" if shank_idx is not None else "")
     try:
@@ -214,11 +276,19 @@ def extract_lfp(rec, bad_channel_ids, probe_idx, logger, params, shank_idx=None)
 
         lfp_rec = rec.remove_channels(bad_channel_ids)
 
+        # This is not needed because this is an erroneous check: https://github.com/SpikeInterface/spikeinterface/pull/4506
+        # Also see https://github.com/SpikeInterface/spikeinterface/issues/4469
+        # si.set_global_job_kwargs(chunk_duration=params['LFP_CHUNK_DURATION'])
+        # logger.info(f"Changed global job kwargs for lfp filtering - increased chunk duration to {params['LFP_CHUNK_DURATION']}")
+        # logger.info(f"Global job kwargs are now: {si.get_global_job_kwargs()}")
+        
         logger.info(f"Applying bandpass filter ({params['LFP_HIGH_PASS']}-{params['LFP_LOW_PASS']} Hz)...")
-        lfp_rec = si.bandpass_filter(lfp_rec, freq_min=params['LFP_HIGH_PASS'], freq_max=params['LFP_LOW_PASS'])
-
+        margin_ms_lfp = params['LFP_HIGH_PASS']*5*1000 # high-pass freq threshold * 5, expressed in ms (e.g. 1Hz --> 5000 ms)
+        lfp_rec = si.bandpass_filter(lfp_rec, freq_min=params['LFP_HIGH_PASS'], freq_max=params['LFP_LOW_PASS'], \
+                                     margin_ms=margin_ms_lfp, ignore_low_freq_error=True)
+        
         logger.info(f"Resampling to {params['LFP_SAMPLE_RATE']} Hz...")
-        lfp_rec = si.resample(lfp_rec, params['LFP_SAMPLE_RATE'])
+        lfp_rec = si.resample(lfp_rec, params['LFP_SAMPLE_RATE'], margin_ms=margin_ms_lfp)
 
         if params['OVERRIDE_LFP_CHANNELS']:
             logger.info(f"Using manual LFP channel selection from: {params['MANUAL_LFP_CHANNELS_FILE']}")
@@ -386,32 +456,22 @@ def extract_lfp(rec, bad_channel_ids, probe_idx, logger, params, shank_idx=None)
         os.makedirs(temp_lfp_folder, exist_ok=True)
 
         logger.info(f"Creating temporary binary for LFP extraction ({tag})...")
-        job_kwargs = dict(n_jobs=params['LFP_NUM_JOBS'], chunk_duration=params['CHUNK_DURATION'], progress_bar=True)
+        job_kwargs = dict(n_jobs=params['LFP_NUM_JOBS'], chunk_duration=params['LFP_CHUNK_DURATION'], progress_bar=True)
         temp_lfp = lfp_rec.save(
             folder=temp_lfp_folder,
             channel_ids=final_channels,
             format="binary",
             return_scaled=True,
-            cast_unsigned=True,
             overwrite=True,
             **job_kwargs
         )
 
         logger.info("Extracting LFP traces from temporary file...")
-        final_lfp = temp_lfp.get_traces(channel_ids=final_channels, return_scaled=True, cast_unsigned=True)
+        final_lfp = temp_lfp.get_traces(channel_ids=final_channels, return_scaled=True)
 
         final_tvec = lfp_rec.get_times()
         final_tvec = final_tvec - final_tvec[0]
         final_fs   = lfp_rec.get_sampling_frequency()
-
-        npy_fname = (
-            f"imec{probe_idx}_shank{shank_idx}_lfp_times.npy"
-            if shank_idx is not None
-            else f"imec{probe_idx}_lfp_times.npy"
-        )
-        lfp_times_npy_path = os.path.join(params['CATGT_OUTPUT_DIR'], npy_fname)
-        np.save(lfp_times_npy_path, final_tvec)
-        logger.info(f"Saved LFP times (.npy) to {lfp_times_npy_path}")
 
         logger.info("Cleaning up temporary LFP files...")
         try:
@@ -476,20 +536,20 @@ def process_probe(probe_idx, logger, params):
         logger.info(f"Reading raw data from {params['CATGT_OUTPUT_DIR']} for stream imec{probe_idx}.ap...")
         raw_rec = si.read_spikeglx(params['CATGT_OUTPUT_DIR'], stream_name=f"imec{probe_idx}.ap")
 
-        if params['PROCESS_BY_SHANK']:
+        if probe_idx in params['PROCESS_BY_SHANK_FOR']:
             logger.info("Splitting recording by channel group (shank)...")
             shank_recs = raw_rec.split_by("group")
             logger.info(f"Found {len(shank_recs)} shank(s): {sorted(shank_recs.keys())}")
 
             all_success = True
+            probe_lfp_tvec = None  # shanks are clock-locked; one time vector per probe
             for shank_idx, shank_rec in sorted(shank_recs.items()):
                 tag = f"probe {probe_idx} shank {shank_idx}"
                 logger.info(f"--- Starting {tag} ({shank_rec.get_num_channels()} channels) ---")
 
                 if params['OVERRIDE_BAD_CHANNELS']:
-                    logger.info(f"Using manual bad channels from: {params['MANUAL_BAD_CHANNELS_FILE']}")
                     bad_channel_ids = _load_manual_bad_channels(
-                        params['MANUAL_BAD_CHANNELS_FILE'], probe_idx, logger, shank_idx=shank_idx
+                        params, probe_idx, logger, shank_idx=shank_idx
                     )
                     if bad_channel_ids is None:
                         all_success = False
@@ -530,6 +590,16 @@ def process_probe(probe_idx, logger, params):
                             'lfp_fs':      final_fs,
                             'shank_ids':   shank_ids,
                         })
+
+                        if probe_lfp_tvec is None:
+                            probe_lfp_tvec = final_tvec
+                        elif (len(final_tvec) != len(probe_lfp_tvec)
+                              or not np.allclose(final_tvec, probe_lfp_tvec)):
+                            logger.warning(
+                                f"LFP time vector for {tag} differs from earlier shanks on probe "
+                                f"{probe_idx}; shanks are expected to be clock-locked"
+                            )
+
                         logger.info(f"LFP extraction completed for {tag}")
                 else:
                     logger.info(f"Skipping LFP extraction for {tag} (not in EXTRACT_LFP_FOR)")
@@ -548,14 +618,16 @@ def process_probe(probe_idx, logger, params):
 
                 logger.info(f"--- Finished {tag} ---")
 
+            if probe_lfp_tvec is not None:
+                save_lfp_times(probe_lfp_tvec, probe_idx, params['CATGT_OUTPUT_DIR'], logger)
+
             return all_success
 
         else:
             # Per-probe mode
             if params['OVERRIDE_BAD_CHANNELS']:
-                logger.info(f"Using manual bad channels from: {params['MANUAL_BAD_CHANNELS_FILE']}")
                 bad_channel_ids = _load_manual_bad_channels(
-                    params['MANUAL_BAD_CHANNELS_FILE'], probe_idx, logger
+                    params, probe_idx, logger
                 )
                 if bad_channel_ids is None:
                     return False
@@ -578,6 +650,8 @@ def process_probe(probe_idx, logger, params):
                 if final_lfp is None:
                     logger.error(f"LFP extraction failed for probe {probe_idx}")
                     return False
+
+                save_lfp_times(final_tvec, probe_idx, params['CATGT_OUTPUT_DIR'], logger)
 
                 lfp_mat_fname = os.path.join(params['OUTPUT_DIR'], f"imec{probe_idx}_clean_lfp.mat")
                 logger.info(f"Saving LFP data to {lfp_mat_fname}")
@@ -622,7 +696,7 @@ def process_session(params_file):
     logger.info(f"Processing probes: {params['PROBE_INDICES']}")
     logger.info(f"Extracting LFP for probes: {params['EXTRACT_LFP_FOR']}")
     logger.info(f"Running Kilosort for probes: {params['RUN_KILOSORT_FOR']}")
-    logger.info(f"Process by shank: {params['PROCESS_BY_SHANK']}")
+    logger.info(f"Process by shank for probes: {params['PROCESS_BY_SHANK_FOR']}")
 
     os.makedirs(params['OUTPUT_DIR'], exist_ok=True)
     os.makedirs(params['FAST_STORAGE_DIR'], exist_ok=True)
