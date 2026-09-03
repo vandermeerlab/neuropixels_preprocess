@@ -1,7 +1,7 @@
 ```
 conda create --name si_preprocess python=3.10
 conda activate si_preprocess
-python -m pip install kilosort==4.0.30
+python -m pip install kilosort==4.1.7
 pip uninstall torch
 # pytorch installationd depends on the cuda-version seen in the output of "nvcc -V" in ther terminal
 # If that command is not found, you have to install toolkit
